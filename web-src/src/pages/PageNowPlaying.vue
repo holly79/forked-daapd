@@ -12,6 +12,11 @@
         <h3 class="subtitle is-5">
           {{ now_playing.album }}
         </h3>
+        <div class="columns" v-if=artwork>
+          <div class="column is-one-third is-offset-one-third">
+            <img :src="artwork_uri" is-square alt="">
+          </div>
+        </div>
         <p class="control has-text-centered fd-progress-now-playing">
           <range-slider
             class="seek-slider fd-has-action"
@@ -84,6 +89,15 @@ export default {
     },
     now_playing () {
       return this.$store.getters.now_playing
+    },
+    artwork () {
+      // console.log('[c] artwork =' + this.state.artwork_url + ' => ' + this.state.artwork_url !== undefined && this.state.artwork_url !== null)
+      return this.state.artwork_url !== undefined && this.state.artwork_url !== null
+    },
+    artwork_uri () {
+      // console.log(new Date() + '[c] artwork =' + this.state.artwork_url + '?item_id=' + this.state.item_id)
+      // for dev add 'http://localhost:3689'
+      return this.state.artwork_url + '?item_id=' + this.state.item_id
     }
   },
 
