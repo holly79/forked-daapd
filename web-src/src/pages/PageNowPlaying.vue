@@ -89,6 +89,9 @@ export default {
       return this.$store.getters.now_playing
     },
     artwork_uri () {
+      if (this.state.artwork_url === undefined) {
+        return ''
+      }
       // for dev add 'http://localhost:3689'
       return this.state.artwork_url + '?item_id=' + this.state.item_id
     }
