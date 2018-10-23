@@ -879,7 +879,7 @@ source_next()
   else
     {
       queue_item = db_queue_fetch_next(cur_streaming->item_id, shuffle);
-      if (!queue_item && repeat == REPEAT_ALL)
+      if (!queue_item)
 	{
 	  if (shuffle)
 	    {
@@ -923,7 +923,22 @@ source_prev()
 
   queue_item = db_queue_fetch_prev(cur_streaming->item_id, shuffle);
   if (!queue_item)
-    return NULL;
+    {
+      int qsz;
+      int pos = db_queue_get_pos(cur_streaming->item_id, 0);
+
+      // do we have no prev item because we're the first item?
+      if ( pos != 0)
+        return NULL;
+
+      qsz = db_queue_get_count();
+      if (qsz < 0)
+        return NULL;
+
+      queue_item = db_queue_fetch_bypos(qsz-1, shuffle);
+      if (!queue_item)
+        return NULL;
+    }
 
   ps = source_new(queue_item);
   free_queue_item(queue_item, 0);
