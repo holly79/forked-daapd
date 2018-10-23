@@ -879,7 +879,7 @@ source_next()
   else
     {
       queue_item = db_queue_fetch_next(cur_streaming->item_id, shuffle);
-      if (!queue_item)
+      if (!queue_item && repeat == REPEAT_ALL)
 	{
 	  if (shuffle)
 	    {
