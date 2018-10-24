@@ -13,7 +13,7 @@
           {{ now_playing.album }}
         </h3>
         <div class="column is-one-third is-offset-one-third">
-          <img :src="artwork_uri" is-square alt="">
+          <img :src="artwork_uri" is-square @error="alt_artwork_uri">
         </div>
         <p class="control has-text-centered fd-progress-now-playing">
           <range-slider
@@ -106,6 +106,10 @@ export default {
       webapi.player_seek(newPosition).catch(() => {
         this.item_progress_ms = this.state.item_progress_ms
       })
+    },
+
+    alt_artwork_uri: function (event) {
+      event.target.src = '/artwork-default.png'
     }
   },
 
