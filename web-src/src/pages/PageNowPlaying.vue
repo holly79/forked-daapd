@@ -11,10 +11,8 @@
         </h2>
         <h3 class="subtitle is-5">
           {{ now_playing.album }}
+          <img class="column is-one-third is-offset-one-third" img :src="artwork_uri" is-square @error="alt_artwork_uri">
         </h3>
-        <div class="column is-one-third is-offset-one-third">
-          <img :src="artwork_uri" is-square @error="alt_artwork_uri">
-        </div>
         <p class="control has-text-centered fd-progress-now-playing">
           <range-slider
             class="seek-slider fd-has-action"
