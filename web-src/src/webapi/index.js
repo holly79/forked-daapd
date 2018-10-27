@@ -130,6 +130,33 @@ export default {
     return axios.get('/api/library/albums/' + albumId + '/tracks')
   },
 
+  library_genres () {
+    return axios.get('/api/library/genres')
+  },
+
+  library_genre (genre) {
+    var genreParams = {
+      'type': 'albums',
+      'media_kind': 'music',
+      'expression': 'genre is "' + genre + '"'
+    }
+    return axios.get('/api/search', {
+      params: genreParams
+    })
+  },
+
+  library_artist_tracks (artist) {
+    if (artist) {
+      var artistParams = {
+        'type': 'tracks',
+        'expression': 'songartistid is "' + artist + '"'
+      }
+      return axios.get('/api/search', {
+        params: artistParams
+      })
+    }
+  },
+
   library_podcasts () {
     return axios.get('/api/library/albums?media_kind=podcast')
   },
