@@ -99,7 +99,8 @@ probably obsolete when you read it :-)
 
 |          Client          | Developer   |  Type  |   Platform    | Working (vers.) |
 | ------------------------ | ----------- | ------ | ------------- | --------------- |
-| iTunes                   | Apple       | DAAP   | Win, OSX      | Yes (12.7)      |
+| iTunes                   | Apple       | DAAP   | Win           | Yes (12.10.1)   |
+| Apple Music              | Apple       | DAAP   | MacOS         | Yes              |
 | Rhythmbox                | Gnome       | DAAP   | Linux         | Yes             |
 | Diapente                 | diapente    | DAAP   | Android       | Yes             |
 | WinAmp DAAPClient        | WardFamily  | DAAP   | WinAmp        | Yes             |
@@ -123,6 +124,9 @@ or alternatively at [http://[your_server_address_here]:3689](http://[your_server
 
 Use the web interface to control playback, trigger manual library rescans, pair
 with remotes, select speakers, authenticate with Spotify, etc.
+
+The Debian forked-daapd package does not include the web interface due to Debian
+packaging rules.
 
 You can find some screenshots and build instructions in [README_PLAYER_WEBINTERFACE.md](https://github.com/ejurgensen/forked-daapd/blob/master/README_PLAYER_WEBINTERFACE.md).
 
@@ -201,15 +205,11 @@ If your Apple TV requires device verification (always required by Apple TV4 with
 tvOS 10.2) then you can do that through the web interface: Select the device and
 then enter the PIN that the Apple TV displays.
 
-For troubleshooting, see [using Remote](#using-remote).
-
 
 ## Chromecast
 
-forked-daapd will discover Chromecast devices available on your network. There
-is no configuration to be done. This feature relies on streaming the audio in
-mp3 to your Chromecast device, which means that mp3 encoding must be supported
-by your ffmpeg/libav. See [MP3 network streaming](#mp3-network-streaming-streaming-to-ios).
+forked-daapd will discover Chromecast devices available on your network, and you
+can then select the device as a speaker. There is no configuration required.
 
 
 ## Local audio through ALSA
@@ -218,6 +218,9 @@ In the config file, you can select ALSA for local audio. This is the default.
 
 When using ALSA, the server will try to syncronize playback with AirPlay. You
 can adjust the syncronization in the config file.
+
+For most setups the default values in the config file should work. If they
+don't, there is help here: [README_ALSA.md](https://github.com/ejurgensen/forked-daapd/blob/master/README_ALSA.md)
 
 
 ## Local audio, Bluetooth and more through Pulseaudio
@@ -246,7 +249,7 @@ Apple does not allow AirPlay receiver apps, and because Apple Home Sharing
 cannot be supported by forked-daapd. So what you can do instead is install a
 music player app like VLC, connect to the stream and control playback with
 Remote. You can also use MPoD in "On the go"-mode, where control and playback is
-integrated in one app (see (#mpd-clients)).
+integrated in one app.
 
 Note that MP3 encoding must be supported by ffmpeg/libav for this to work. If
 it is not available you will see a message in the log file. In Debian/Ubuntu you
@@ -417,6 +420,9 @@ Now you can make a cron job that runs this command:
 When forked-daapd detects a file with filename ending .init-rescan it will
 perform a bulk scan similar to the startup scan.
 
+Alternatively, you can force a metadata scan of the library even if the
+files have not changed by creating a filename ending `.meta-rescan`.
+
 
 ### Troubleshooting library issues
 
@@ -534,11 +540,11 @@ The source for this version of forked-daapd can be found here:
 
   [https://github.com/ejurgensen/forked-daapd.git](https://github.com/ejurgensen/forked-daapd.git)
 
-The original (now unmaintained) source can be found here:
-
-  [http://git.debian.org/?p=users/jblache/forked-daapd.git](http://git.debian.org/?p=users/jblache/forked-daapd.git)
-
 README's for previous versions of forked-daapd:
+
+  [forked-daapd version 27.0](https://github.com/ejurgensen/forked-daapd/blob/27.0/README.md)
+
+  [forked-daapd version 26.5](https://github.com/ejurgensen/forked-daapd/blob/26.5/README.md)
 
   [forked-daapd version 26.4](https://github.com/ejurgensen/forked-daapd/blob/26.4/README.md)
 

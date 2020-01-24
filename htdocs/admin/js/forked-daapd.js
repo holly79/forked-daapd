@@ -24,6 +24,15 @@ var app = new Vue({
     this.loadLastfm();
   },
 
+  computed: {
+    spotify_missing_scope () {
+      if (this.spotify.webapi_token_valid && this.spotify.webapi_granted_scope && this.spotify.webapi_required_scope) {
+        return this.spotify.webapi_required_scope.split(' ').filter(scope => this.spotify.webapi_granted_scope.indexOf(scope) < 0)
+      }
+      return []
+    }
+  },
+
   methods: {
     loadConfig: function() {
       axios.get('/api/config').then(response => {
@@ -53,7 +62,12 @@ var app = new Vue({
 
     update: function() {
       this.library.updating = true;
-      axios.get('/api/update').then(console.log('Library is updating'));
+      axios.put('/api/update').then(console.log('Library is updating'));
+    },
+
+    update_meta: function() {
+      this.library.updating = true;
+      axios.put('/api/rescan').then(console.log('Library is rescanning meta'));
     },
 
     kickoffPairing: function() {
@@ -130,7 +144,13 @@ var app = new Vue({
         console.log('Websocket disabled');
         return;
       }
-      var socket = new WebSocket('ws://' + document.domain + ':' + this.config.websocket_port, 'notify');
+
+      var protocol = 'ws://'
+      if (window.location.protocol === 'https:') {
+          protocol = 'wss://'
+      }
+
+      var socket = new WebSocket(protocol + document.domain + ':' + this.config.websocket_port, 'notify');
       const vm = this;
       socket.onopen = function() {
           socket.send(JSON.stringify({ notify: ['update', 'pairing', 'spotify', 'lastfm', 'outputs']}));

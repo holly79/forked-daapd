@@ -1218,12 +1218,19 @@ cache_artwork_stash_impl(void *arg, int *retval)
 
   cmdarg = arg;
 
-  /* Clear current stash */
+  // Clear current stash
   if (g_stash.path)
     {
       free(g_stash.path);
       free(g_stash.data);
       memset(&g_stash, 0, sizeof(struct stash));
+    }
+
+  // If called with no evbuf then we are done, we just needed to clear the stash
+  if (!cmdarg->evbuf)
+    {
+      *retval = 0;
+      return COMMAND_END;
     }
 
   g_stash.size = evbuffer_get_length(cmdarg->evbuf);
@@ -1673,6 +1680,7 @@ cache_deinit(void)
       return;
     }
 
-  // Free event base (should free events too)
+  // Free event base
+  event_free(cache_daap_updateev);
   event_base_free(evbase_cache);
 }

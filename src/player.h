@@ -7,14 +7,7 @@
 
 #include "db.h"
 
-/* AirTunes v2 packet interval in ns */
-/* (352 samples/packet * 1e9 ns/s) / 44100 samples/s = 7981859 ns/packet */
-# define AIRTUNES_V2_STREAM_PERIOD 7981859
-
-/* AirTunes v2 number of samples per packet */
-#define AIRTUNES_V2_PACKET_SAMPLES  352
-
-/* Maximum number of previously played songs that are remembered */
+// Maximum number of previously played songs that are remembered
 #define MAX_HISTORY_COUNT 20
 
 enum play_status {
@@ -29,10 +22,16 @@ enum repeat_mode {
   REPEAT_ALL  = 2,
 };
 
-struct spk_info {
+enum player_seek_mode {
+  PLAYER_SEEK_POSITION = 1,
+  PLAYER_SEEK_RELATIVE = 2,
+};
+
+struct player_speaker_info {
   uint64_t id;
-  const char *name;
-  const char *output_type;
+  uint32_t active_remote;
+  char name[255];
+  char output_type[50];
   int relvol;
   int absvol;
 
@@ -64,7 +63,7 @@ struct player_status {
   uint32_t len_ms;
 };
 
-typedef void (*spk_enum_cb)(struct spk_info *spk, void *arg);
+typedef void (*spk_enum_cb)(struct player_speaker_info *spk, void *arg);
 
 struct player_history
 {
@@ -79,15 +78,11 @@ struct player_history
   uint32_t item_id[MAX_HISTORY_COUNT];
 };
 
-
-int
-player_get_current_pos(uint64_t *pos, struct timespec *ts, int commit);
-
 int
 player_get_status(struct player_status *status);
 
 int
-player_now_playing(uint32_t *id);
+player_playing_now(uint32_t *id);
 
 void
 player_speaker_enumerate(spk_enum_cb cb, void *arg);
@@ -96,13 +91,16 @@ int
 player_speaker_set(uint64_t *ids);
 
 int
+player_speaker_get_byid(struct player_speaker_info *spk, uint64_t id);
+
+int
+player_speaker_get_byactiveremote(struct player_speaker_info *spk, uint32_t active_remote);
+
+int
 player_speaker_enable(uint64_t id);
 
 int
 player_speaker_disable(uint64_t id);
-
-void
-player_speaker_status_trigger(void);
 
 int
 player_playback_start(void);
@@ -120,7 +118,7 @@ int
 player_playback_pause(void);
 
 int
-player_playback_seek(int ms);
+player_playback_seek(int seek_ms, enum player_seek_mode seek_mode);
 
 int
 player_playback_next(void);
@@ -138,7 +136,7 @@ int
 player_volume_setabs_speaker(uint64_t id, int vol);
 
 int
-player_volume_byactiveremote(uint32_t activeremote, const char *value);
+player_volume_update_speaker(uint64_t id, const char *value);
 
 int
 player_repeat_set(enum repeat_mode mode);
@@ -148,7 +146,6 @@ player_shuffle_set(int enable);
 
 int
 player_consume_set(int enable);
-
 
 void
 player_queue_clear_history(void);
@@ -168,8 +165,8 @@ player_device_remove(void *device);
 void
 player_raop_verification_kickoff(char **arglist);
 
-void
-player_metadata_send(void *imd, void *omd);
+const char *
+player_pmap(void *p);
 
 int
 player_init(void);

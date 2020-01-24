@@ -36,6 +36,7 @@
 #endif
 
 #include <event2/event.h>
+#include <event2/bufferevent.h>
 
 #include "httpd_dacp.h"
 #include "httpd_daap.h"
@@ -48,6 +49,8 @@
 #include "daap_query.h"
 #include "player.h"
 #include "listener.h"
+
+#define DACP_VOLUME_STEP 5
 
 /* httpd event base, from httpd.c */
 extern struct event_base *evbase_httpd;
@@ -112,6 +115,8 @@ dacp_propset_volume(const char *value, struct httpd_request *hreq);
 static void
 dacp_propset_devicevolume(const char *value, struct httpd_request *hreq);
 static void
+dacp_propset_devicepreventplayback(const char *value, struct httpd_request *hreq);
+static void
 dacp_propset_playingtime(const char *value, struct httpd_request *hreq);
 static void
 dacp_propset_shufflestate(const char *value, struct httpd_request *hreq);
@@ -173,13 +178,13 @@ dacp_nowplaying(struct evbuffer *evbuf, struct player_status *status, struct db_
   if ((status->status == PLAY_STOPPED) || !queue_item)
     return;
 
-  /* Send bogus id's if playing internet radio, because clients like
+  /* Send bogus id's if playing internet radio or pipe, because clients like
    * Remote and Retune will only update metadata (like artwork) if the id's
    * change (which they wouldn't do if we sent the real ones)
    * FIXME: Giving the client invalid ids on purpose is hardly ideal, but the
    * clients don't seem to use these ids for anything other than rating.
    */
-  if (queue_item->data_kind == DATA_KIND_HTTP)
+  if (queue_item->data_kind == DATA_KIND_HTTP || queue_item->data_kind == DATA_KIND_PIPE)
     {
       id = djb_hash(queue_item->album, strlen(queue_item->album));
       songalbumid = (int64_t)id;
@@ -373,14 +378,14 @@ dacp_queueitem_add(const char *query, const char *queuefilter, const char *sort,
       else if ((len > 6) && (strncmp(queuefilter, "genre:", 6) == 0))
 	{
 	  qp.type = Q_ITEMS;
-	  ret = db_snprintf(buf, sizeof(buf), "f.genre = %Q", queuefilter + 6);
-	  if (ret < 0)
+	  ret = snprintf(buf, sizeof(buf), "'daap.song%s'", queuefilter);
+	  if (ret < 0 || ret >= sizeof(buf))
 	    {
-	      DPRINTF(E_LOG, L_DACP, "Invalid genre in queuefilter: '%s'\n", queuefilter);
+	      DPRINTF(E_LOG, L_DACP, "Invalid genre length in queuefilter: '%s'\n", queuefilter);
 
 	      return -1;
 	    }
-	  qp.filter = strdup(buf);
+	  qp.filter = daap_query_parse_sql(buf);
 	}
       else
 	{
@@ -512,7 +517,7 @@ playqueuecontents_add_queue_item(struct evbuffer *songlist, struct db_queue_item
 }
 
 static void
-speaker_enum_cb(struct spk_info *spk, void *arg)
+speaker_enum_cb(struct player_speaker_info *spk, void *arg)
 {
   struct evbuffer *evbuf;
   int len;
@@ -542,6 +547,47 @@ speaker_enum_cb(struct spk_info *spk, void *arg)
   dmap_add_int(evbuf, "cmvo", spk->relvol);    /* 12 */
 }
 
+static int
+speaker_get(struct player_speaker_info *speaker_info, struct httpd_request *hreq, const char *req_name)
+{
+  struct evkeyvalq *headers;
+  const char *remote;
+  uint32_t active_remote;
+  int ret;
+
+  headers = evhttp_request_get_input_headers(hreq->req);
+  remote = evhttp_find_header(headers, "Active-Remote");
+
+  if (!headers || !remote || (safe_atou32(remote, &active_remote) < 0))
+    {
+      DPRINTF(E_LOG, L_DACP, "'%s' request from '%s' has invalid Active-Remote: '%s'\n", req_name, hreq->peer_address, remote);
+      return -1;
+    }
+
+  ret = player_speaker_get_byactiveremote(speaker_info, active_remote);
+  if (ret < 0)
+    {
+      DPRINTF(E_LOG, L_DACP, "'%s' request from '%s' has unknown Active-Remote: '%s'\n", req_name, hreq->peer_address, remote);
+      return -1;
+    }
+
+  return 0;
+}
+
+static int
+speaker_volume_step(struct player_speaker_info *speaker_info, int step)
+{
+  int new_volume;
+
+  new_volume = speaker_info->absvol + step;
+
+  // Make sure we are setting a correct value
+  new_volume = new_volume > 100 ? 100 : new_volume;
+  new_volume = new_volume < 0 ? 0 : new_volume;
+
+  return player_volume_setabs_speaker(speaker_info->id, new_volume);
+}
+
 static void
 seek_timer_cb(int fd, short what, void *arg)
 {
@@ -549,7 +595,7 @@ seek_timer_cb(int fd, short what, void *arg)
 
   DPRINTF(E_DBG, L_DACP, "Seek timer expired, target %d ms\n", seek_target);
 
-  ret = player_playback_seek(seek_target);
+  ret = player_playback_seek(seek_target, PLAYER_SEEK_POSITION);
   if (ret < 0)
     {
       DPRINTF(E_LOG, L_DACP, "Player failed to seek to %d ms\n", seek_target);
@@ -697,13 +743,13 @@ playstatusupdate_cb(int fd, short what, void *arg)
   read(update_pipe[0], &dummy, sizeof(dummy));
 #endif
 
+  current_rev++;
+
   if (!update_requests)
     goto readd;
 
   CHECK_NULL(L_DACP, evbuf = evbuffer_new());
   CHECK_NULL(L_DACP, update = evbuffer_new());
-
-  current_rev++;
 
   ret = make_playstatusupdate(update);
   if (ret < 0)
@@ -795,6 +841,7 @@ update_fail_cb(struct evhttp_connection *evcon, void *arg)
       p->next = ur->next;
     }
 
+  evhttp_request_free(ur->req);
   free(ur);
 }
 
@@ -956,20 +1003,35 @@ dacp_propset_volume(const char *value, struct httpd_request *hreq)
 static void
 dacp_propset_devicevolume(const char *value, struct httpd_request *hreq)
 {
-  struct evkeyvalq *headers;
-  const char *remote;
-  uint32_t id;
+  struct player_speaker_info speaker_info;
 
-  headers = evhttp_request_get_input_headers(hreq->req);
-  remote = evhttp_find_header(headers, "Active-Remote");
+  if (speaker_get(&speaker_info, hreq, "device-volume") < 0)
+    return;
 
-  if (!headers || !remote || (safe_atou32(remote, &id) < 0))
-    {
-      DPRINTF(E_LOG, L_DACP, "Request for setting device-volume has invalid Active-Remote: '%s'\n", remote);
-      return;
-    }
+  player_volume_update_speaker(speaker_info.id, value);
+}
 
-  player_volume_byactiveremote(id, value);
+// iTunes seems to use this as way for a speaker to tell the server that it is
+// busy with something else. If the speaker makes the request with the value 1,
+// then iTunes will disable the speaker, and if it is the only speaker, then
+// playback will also be paused. It is not possible for the user to restart the
+// speaker until it has made a request with value 0 (if attempted, iTunes will
+// show it is waiting for the speaker). As you can see from the below, we
+// don't fully match this behaviour, instead we just enable/disable.
+static void
+dacp_propset_devicepreventplayback(const char *value, struct httpd_request *hreq)
+{
+  struct player_speaker_info speaker_info;
+
+  if (speaker_get(&speaker_info, hreq, "device-prevent-playback") < 0)
+    return;
+
+  if (value[0] == '1')
+    player_speaker_disable(speaker_info.id);
+  else if (value[0] == '0')
+    player_speaker_enable(speaker_info.id);
+  else
+    DPRINTF(E_LOG, L_DACP, "Request for setting device-prevent-playback has invalid value: '%s'\n", value);
 }
 
 static void
@@ -1083,7 +1145,7 @@ dacp_propset_userrating(const char *value, struct httpd_request *hreq)
     {
       DPRINTF(E_WARN, L_DACP, "Invalid id %d for rating, defaulting to player id\n", itemid);
 
-      ret = player_now_playing(&itemid);
+      ret = player_playing_now(&itemid);
       if (ret < 0)
 	{
 	  DPRINTF(E_WARN, L_DACP, "Could not find an id for rating\n");
@@ -2170,6 +2232,7 @@ dacp_reply_playstatusupdate(struct httpd_request *hreq)
 {
   struct dacp_update_request *ur;
   struct evhttp_connection *evcon;
+  struct bufferevent *bufev;
   const char *param;
   int reqd_rev;
   int ret;
@@ -2196,7 +2259,10 @@ dacp_reply_playstatusupdate(struct httpd_request *hreq)
       return -1;
     }
 
-  if ((reqd_rev == 0) || (reqd_rev == 1))
+  // Caller didn't use current revision number. It was probably his first
+  // request so we will give him status immediately, incl. which revision number
+  // to use when he calls again.
+  if (reqd_rev != current_rev)
     {
       ret = make_playstatusupdate(hreq->reply);
       if (ret < 0)
@@ -2207,7 +2273,7 @@ dacp_reply_playstatusupdate(struct httpd_request *hreq)
       return ret;
     }
 
-  /* Else, just let the request hang until we have changes to push back */
+  // Else, just let the request hang until we have changes to push back
   ur = calloc(1, sizeof(struct dacp_update_request));
   if (!ur)
     {
@@ -2227,7 +2293,18 @@ dacp_reply_playstatusupdate(struct httpd_request *hreq)
    */
   evcon = evhttp_request_get_connection(hreq->req);
   if (evcon)
-    evhttp_connection_set_closecb(evcon, update_fail_cb, ur);
+    {
+      evhttp_connection_set_closecb(evcon, update_fail_cb, ur);
+
+      // This is a workaround for some versions of libevent (2.0, but possibly
+      // also 2.1) that don't detect if the client hangs up, and thus don't
+      // clean up and never call update_fail_cb(). See github issue #870 and
+      // https://github.com/libevent/libevent/issues/666. It should probably be
+      // removed again in the future. The workaround is also present in daap.c
+      bufev = evhttp_connection_get_bufferevent(evcon);
+      if (bufev)
+	bufferevent_enable(bufev, EV_READ);
+    }
 
   return 0;
 }
@@ -2277,7 +2354,7 @@ dacp_reply_nowplayingartwork(struct httpd_request *hreq)
       goto error;
     }
 
-  ret = player_now_playing(&id);
+  ret = player_playing_now(&id);
   if (ret < 0)
     goto no_artwork;
 
@@ -2433,11 +2510,12 @@ dacp_reply_setproperty(struct httpd_request *hreq)
     return -1;
 
   /* Known properties (see dacp_prop.gperf):
-   * dacp.shufflestate  0/1
-   * dacp.repeatstate   0/1/2
-   * dacp.playingtime   seek to time in ms
-   * dmcp.volume        0-100, float
-   * dmcp.device-volume -144-0, float (raop volume)
+   * dacp.shufflestate                0/1
+   * dacp.repeatstate                 0/1/2
+   * dacp.playingtime                 seek to time in ms
+   * dmcp.volume                      0-100, float
+   * dmcp.device-volume               -144-0, float (raop volume)
+   * dmcp.device-prevent-playback     0/1
    */
 
   /* /ctrl-int/1/setproperty?dacp.shufflestate=1&session-id=100 */
@@ -2582,6 +2660,83 @@ dacp_reply_setspeakers(struct httpd_request *hreq)
   return 0;
 }
 
+static int
+dacp_reply_volumeup(struct httpd_request *hreq)
+{
+  struct player_speaker_info speaker_info;
+  int ret;
+
+  ret = speaker_get(&speaker_info, hreq, "volumeup");
+  if (ret < 0)
+    {
+      httpd_send_error(hreq->req, HTTP_BADREQUEST, "Bad Request");
+      return -1;
+    }
+
+  ret = speaker_volume_step(&speaker_info, DACP_VOLUME_STEP);
+  if (ret < 0)
+    {
+      httpd_send_error(hreq->req, HTTP_BADREQUEST, "Bad Request");
+      return -1;
+    }
+
+  /* 204 No Content is the canonical reply */
+  httpd_send_reply(hreq->req, HTTP_NOCONTENT, "No Content", hreq->reply, HTTPD_SEND_NO_GZIP);
+
+  return 0;
+}
+
+static int
+dacp_reply_volumedown(struct httpd_request *hreq)
+{
+  struct player_speaker_info speaker_info;
+  int ret;
+
+  ret = speaker_get(&speaker_info, hreq, "volumedown");
+  if (ret < 0)
+    {
+      httpd_send_error(hreq->req, HTTP_BADREQUEST, "Bad Request");
+      return -1;
+    }
+
+  ret = speaker_volume_step(&speaker_info, -DACP_VOLUME_STEP);
+  if (ret < 0)
+    {
+      httpd_send_error(hreq->req, HTTP_BADREQUEST, "Bad Request");
+      return -1;
+    }
+
+  /* 204 No Content is the canonical reply */
+  httpd_send_reply(hreq->req, HTTP_NOCONTENT, "No Content", hreq->reply, HTTPD_SEND_NO_GZIP);
+
+  return 0;
+}
+
+static int
+dacp_reply_mutetoggle(struct httpd_request *hreq)
+{
+  struct player_speaker_info speaker_info;
+  int ret;
+
+  ret = speaker_get(&speaker_info, hreq, "mutetoggle");
+  if (ret < 0)
+    {
+      httpd_send_error(hreq->req, HTTP_BADREQUEST, "Bad Request");
+      return -1;
+    }
+
+  // We don't actually mute, because the player doesn't currently support unmuting
+  if (speaker_info.selected)
+    player_speaker_disable(speaker_info.id);
+  else
+    player_speaker_enable(speaker_info.id);
+
+  /* 204 No Content is the canonical reply */
+  httpd_send_reply(hreq->req, HTTP_NOCONTENT, "No Content", hreq->reply, HTTPD_SEND_NO_GZIP);
+
+  return 0;
+}
+
 static struct httpd_uri_map dacp_handlers[] =
   {
     {
@@ -2667,6 +2822,18 @@ static struct httpd_uri_map dacp_handlers[] =
     {
       .regexp = "^/ctrl-int/[[:digit:]]+/setspeakers$",
       .handler = dacp_reply_setspeakers
+    },
+    {
+      .regexp = "^/ctrl-int/[[:digit:]]+/volumeup$",
+      .handler = dacp_reply_volumeup
+    },
+    {
+      .regexp = "^/ctrl-int/[[:digit:]]+/volumedown$",
+      .handler = dacp_reply_volumedown
+    },
+    {
+      .regexp = "^/ctrl-int/[[:digit:]]+/mutetoggle$",
+      .handler = dacp_reply_mutetoggle
     },
     {
       .regexp = NULL,

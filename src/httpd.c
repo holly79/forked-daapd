@@ -80,6 +80,11 @@
   "<h1>%s</h1>\n" \
   "</body>\n</html>\n"
 
+#define HTTPD_STREAM_SAMPLE_RATE 44100
+#define HTTPD_STREAM_BPS         16
+#define HTTPD_STREAM_CHANNELS    2
+
+
 struct content_type_map {
   char *ext;
   char *ctype;
@@ -296,7 +301,7 @@ httpd_request_etag_matches(struct evhttp_request *req, const char *etag)
 
   // Add cache headers to allow client side caching
   output_headers = evhttp_request_get_output_headers(req);
-  evhttp_add_header(output_headers, "Cache-Control", "private");
+  evhttp_add_header(output_headers, "Cache-Control", "private no-cache");
   evhttp_add_header(output_headers, "ETag", etag);
 
   return false;
@@ -332,7 +337,7 @@ httpd_request_not_modified_since(struct evhttp_request *req, const time_t *mtime
 
   // Add cache headers to allow client side caching
   output_headers = evhttp_request_get_output_headers(req);
-  evhttp_add_header(output_headers, "Cache-Control", "private");
+  evhttp_add_header(output_headers, "Cache-Control", "private no-cache");
   evhttp_add_header(output_headers, "Last-Modified", last_modified);
 
   return false;
@@ -1029,6 +1034,7 @@ httpd_request_parse(struct evhttp_request *req, struct httpd_uri_parsed *uri_par
 void
 httpd_stream_file(struct evhttp_request *req, int id)
 {
+  struct media_quality quality = { HTTPD_STREAM_SAMPLE_RATE, HTTPD_STREAM_BPS, HTTPD_STREAM_CHANNELS, 0 };
   struct media_file_info *mfi;
   struct stream_ctx *st;
   void (*stream_cb)(int fd, short event, void *arg);
@@ -1128,7 +1134,7 @@ httpd_stream_file(struct evhttp_request *req, int id)
 
       stream_cb = stream_chunk_xcode_cb;
 
-      st->xcode = transcode_setup(XCODE_PCM16_HEADER, mfi->data_kind, mfi->path, mfi->song_length, &st->size);
+      st->xcode = transcode_setup(XCODE_PCM16_HEADER, &quality, mfi->data_kind, mfi->path, mfi->song_length, &st->size);
       if (!st->xcode)
 	{
 	  DPRINTF(E_WARN, L_HTTPD, "Transcoding setup failed, aborting streaming\n");
@@ -1549,7 +1555,7 @@ httpd_basic_auth(struct evhttp_request *req, const char *user, const char *passw
 
   auth += strlen("Basic ");
 
-  authuser = b64_decode(auth);
+  authuser = (char *)b64_decode(NULL, auth);
   if (!authuser)
     {
       DPRINTF(E_LOG, L_HTTPD, "Could not decode Authentication header\n");
@@ -1742,7 +1748,7 @@ httpd_init(const char *webroot)
     {
       DPRINTF(E_FATAL, L_HTTPD, "Could not create exit event\n");
 
-      goto event_fail;
+      goto exitev_fail;
     }
   event_add(exitev, NULL);
 
@@ -1751,7 +1757,7 @@ httpd_init(const char *webroot)
     {
       DPRINTF(E_FATAL, L_HTTPD, "Could not create HTTP server\n");
 
-      goto event_fail;
+      goto evhttpd_fail;
     }
 
   v6enabled = cfg_getbool(cfg_getsec(cfg, "general"), "ipv6");
@@ -1813,7 +1819,9 @@ httpd_init(const char *webroot)
  thread_fail:
  bind_fail:
   evhttp_free(evhttpd);
- event_fail:
+ evhttpd_fail:
+  event_free(exitev);
+ exitev_fail:
 #ifdef HAVE_EVENTFD
   close(exit_efd);
 #else
@@ -1893,6 +1901,7 @@ httpd_deinit(void)
   close(exit_pipe[0]);
   close(exit_pipe[1]);
 #endif
+  event_free(exitev);
   evhttp_free(evhttpd);
   event_base_free(evbase_httpd);
 }

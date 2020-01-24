@@ -100,7 +100,11 @@ static cfg_opt_t sec_library[] =
     CFG_STR_LIST("no_decode", NULL, CFGF_NONE),
     CFG_STR_LIST("force_decode", NULL, CFGF_NONE),
     CFG_BOOL("pipe_autostart", cfg_true, CFGF_NONE),
+    CFG_INT("pipe_sample_rate", 44100, CFGF_NONE),
+    CFG_INT("pipe_bits_per_sample", 16, CFGF_NONE),
     CFG_BOOL("rating_updates", cfg_false, CFGF_NONE),
+    CFG_BOOL("allow_modifying_stored_playlists", cfg_false, CFGF_NONE),
+    CFG_STR("default_playlist_directory", NULL, CFGF_NONE),
     CFG_END()
   };
 
@@ -113,8 +117,21 @@ static cfg_opt_t sec_audio[] =
     CFG_STR("card", "default", CFGF_NONE),
     CFG_STR("mixer", NULL, CFGF_NONE),
     CFG_STR("mixer_device", NULL, CFGF_NONE),
-    CFG_INT("offset", 0, CFGF_NONE),
-    CFG_INT("adjust_period_seconds", 10, CFGF_NONE),
+    CFG_BOOL("sync_disable", cfg_false, CFGF_NONE),
+    CFG_INT("offset", 0, CFGF_DEPRECATED),
+    CFG_INT("offset_ms", 0, CFGF_NONE),
+    CFG_INT("adjust_period_seconds", 100, CFGF_NONE),
+    CFG_END()
+  };
+
+
+/* local ALSA audio section structure */
+static cfg_opt_t sec_alsa[] =
+  {
+    CFG_STR("nickname", NULL, CFGF_NONE),
+    CFG_STR("mixer", NULL, CFGF_NONE),
+    CFG_STR("mixer_device", NULL, CFGF_NONE),
+    CFG_INT("offset_ms", 0, CFGF_NONE),
     CFG_END()
   };
 
@@ -123,7 +140,16 @@ static cfg_opt_t sec_airplay[] =
   {
     CFG_INT("max_volume", 11, CFGF_NONE),
     CFG_BOOL("exclude", cfg_false, CFGF_NONE),
+    CFG_BOOL("permanent", cfg_false, CFGF_NONE),
     CFG_STR("password", NULL, CFGF_NONE),
+    CFG_END()
+  };
+
+/* Chromecast device section structure */
+static cfg_opt_t sec_chromecast[] =
+  {
+    CFG_BOOL("exclude", cfg_false, CFGF_NONE),
+    CFG_INT("offset_ms", 0, CFGF_NONE),
     CFG_END()
   };
 
@@ -166,8 +192,17 @@ static cfg_opt_t sec_mpd[] =
     CFG_INT("port", 6600, CFGF_NONE),
     CFG_INT("http_port", 0, CFGF_NONE),
     CFG_BOOL("clear_queue_on_stop_disable", cfg_false, CFGF_NONE),
-    CFG_BOOL("allow_modifying_stored_playlists", cfg_false, CFGF_NONE),
-    CFG_STR("default_playlist_directory", NULL, CFGF_NONE),
+    CFG_BOOL("allow_modifying_stored_playlists", cfg_false, CFGF_NODEFAULT | CFGF_DEPRECATED),
+    CFG_STR("default_playlist_directory", NULL, CFGF_NODEFAULT | CFGF_DEPRECATED),
+    CFG_END()
+  };
+
+/* streaming section structure */
+static cfg_opt_t sec_streaming[] =
+  {
+    CFG_INT("sample_rate", 44100, CFGF_NONE),
+    CFG_INT("bit_rate", 192, CFGF_NONE),
+    CFG_INT("icy_metaint", 16384, CFGF_NONE),
     CFG_END()
   };
 
@@ -177,11 +212,14 @@ static cfg_opt_t toplvl_cfg[] =
     CFG_SEC("general", sec_general, CFGF_NONE),
     CFG_SEC("library", sec_library, CFGF_NONE),
     CFG_SEC("audio", sec_audio, CFGF_NONE),
+    CFG_SEC("alsa", sec_alsa, CFGF_MULTI | CFGF_TITLE),
     CFG_SEC("airplay", sec_airplay, CFGF_MULTI | CFGF_TITLE),
+    CFG_SEC("chromecast", sec_chromecast, CFGF_MULTI | CFGF_TITLE),
     CFG_SEC("fifo", sec_fifo, CFGF_NONE),
     CFG_SEC("spotify", sec_spotify, CFGF_NONE),
     CFG_SEC("sqlite", sec_sqlite, CFGF_NONE),
     CFG_SEC("mpd", sec_mpd, CFGF_NONE),
+    CFG_SEC("streaming", sec_streaming, CFGF_NONE),
     CFG_END()
   };
 
@@ -190,6 +228,19 @@ uint64_t libhash;
 uid_t runas_uid;
 gid_t runas_gid;
 
+
+static void
+logger_confuse(cfg_t *cfg, const char *format, va_list args)
+{
+  char fmt[80];
+
+  if (cfg && cfg->name && cfg->line)
+    snprintf(fmt, sizeof(fmt), "[%s:%d] %s\n", cfg->name, cfg->line, format);
+  else
+    snprintf(fmt, sizeof(fmt), "%s\n", format);
+
+  DVPRINTF(E_LOG, L_CONF, fmt, args);
+}
 
 static int
 cb_loglevel(cfg_t *cfg, cfg_opt_t *opt, const char *value, void *result)
@@ -339,6 +390,8 @@ conffile_load(char *file)
   int ret;
 
   cfg = cfg_init(toplvl_cfg, CFGF_NONE);
+
+  cfg_set_error_function(cfg, logger_confuse);
 
   ret = cfg_parse(cfg, file);
 

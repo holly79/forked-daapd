@@ -26,6 +26,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "artwork.h"
 #include "cache.h"
 #include "conffile.h"
 #include "db.h"
@@ -53,6 +54,7 @@ struct spotify_album
   const char *release_date_precision;
   int release_year;
   const char *uri;
+  const char *artwork_url;
 };
 
 struct spotify_track
@@ -71,6 +73,7 @@ struct spotify_track
   const char *name;
   int track_number;
   const char *uri;
+  const char *artwork_url;
 
   bool is_playable;
   const char *restrictions;
@@ -90,10 +93,10 @@ struct spotify_playlist
   int tracks_count;
 };
 
-
 // Credentials for the web api
 static char *spotify_access_token;
 static char *spotify_refresh_token;
+static char *spotify_granted_scope;
 static char *spotify_user_country;
 static char *spotify_user;
 
@@ -116,16 +119,20 @@ static bool scanning;
 // Endpoints and credentials for the web api
 static const char *spotify_client_id     = "0e684a5422384114a8ae7ac020f01789";
 static const char *spotify_client_secret = "232af95f39014c9ba218285a5c11a239";
+static const char *spotify_scope         = "playlist-read-private playlist-read-collaborative user-library-read user-read-private";
+
 static const char *spotify_auth_uri      = "https://accounts.spotify.com/authorize";
 static const char *spotify_token_uri     = "https://accounts.spotify.com/api/token";
-static const char *spotify_playlist_uri	 = "https://api.spotify.com/v1/users/%s/playlists/%s";
+
+static const char *spotify_playlist_uri	 = "https://api.spotify.com/v1/playlists/%s";
 static const char *spotify_track_uri     = "https://api.spotify.com/v1/tracks/%s";
 static const char *spotify_me_uri        = "https://api.spotify.com/v1/me";
 static const char *spotify_albums_uri    = "https://api.spotify.com/v1/me/albums?limit=50";
 static const char *spotify_album_uri = "https://api.spotify.com/v1/albums/%s";
 static const char *spotify_album_tracks_uri = "https://api.spotify.com/v1/albums/%s/tracks";
 static const char *spotify_playlists_uri = "https://api.spotify.com/v1/me/playlists?limit=50";
-static const char *spotify_playlist_tracks_uri = "https://api.spotify.com/v1/users/%s/playlists/%s/tracks";
+static const char *spotify_playlist_tracks_uri = "https://api.spotify.com/v1/playlists/%s/tracks";
+static const char *spotify_artist_albums_uri = "https://api.spotify.com/v1/artists/%s/albums?include_groups=album,single";
 
 
 
@@ -214,6 +221,13 @@ request_access_tokens(struct keyval *kv, const char **err)
     {
       free(spotify_refresh_token);
       spotify_refresh_token = strdup(tmp);
+    }
+
+  tmp = jparse_str_from_obj(haystack, "scope");
+  if (tmp)
+    {
+      free(spotify_granted_scope);
+      spotify_granted_scope = strdup(tmp);
     }
 
   expires_in = jparse_int_from_obj(haystack, "expires_in");
@@ -577,12 +591,52 @@ request_pagingobject_endpoint(const char *href, paging_item_cb item_cb, paging_r
   return 0;
 }
 
-static void
-parse_metadata_track(json_object *jsontrack, struct spotify_track *track)
+static const char *
+get_album_image(json_object *jsonalbum, int max_w)
 {
-  json_object* jsonalbum;
-  json_object* jsonartists;
-  json_object* needle;
+  json_object *jsonimages;
+  json_object *jsonimage;
+  int image_count;
+  int index;
+  const char *artwork_url;
+
+  artwork_url = NULL;
+
+  if (!json_object_object_get_ex(jsonalbum, "images", &jsonimages))
+    {
+      DPRINTF(E_DBG, L_SPOTIFY, "No images in for spotify album object found\n");
+      return NULL;
+    }
+
+  // Find first image that has a smaller width than the given max_w
+  // (this should avoid the need for resizing and improve performance at the cost of some quality loss)
+  // Note that Spotify returns the images ordered descending by width (widest image first)
+  // Special case is if no max width (max_w = 0) is given, the widest images will be used
+  image_count = json_object_array_length(jsonimages);
+  for (index = 0; index < image_count; index++)
+    {
+      jsonimage = json_object_array_get_idx(jsonimages, index);
+      if (jsonimage)
+	{
+	  artwork_url = jparse_str_from_obj(jsonimage, "url");
+
+	  if (max_w <= 0  || jparse_int_from_obj(jsonimage, "width") <= max_w)
+	    {
+	      // We have the first image that has a smaller width than the given max_w
+	      break;
+	    }
+	}
+    }
+
+  return artwork_url;
+}
+
+static void
+parse_metadata_track(json_object *jsontrack, struct spotify_track *track, int max_w)
+{
+  json_object *jsonalbum;
+  json_object *jsonartists;
+  json_object *needle;
 
   memset(track, 0, sizeof(struct spotify_track));
 
@@ -591,6 +645,8 @@ parse_metadata_track(json_object *jsontrack, struct spotify_track *track)
       track->album = jparse_str_from_obj(jsonalbum, "name");
       if (json_object_object_get_ex(jsonalbum, "artists", &jsonartists))
 	track->album_artist = jparse_str_from_array(jsonartists, 0, "name");
+
+      track->artwork_url = get_album_image(jsonalbum, max_w);
     }
 
   if (json_object_object_get_ex(jsontrack, "artists", &jsonartists))
@@ -636,7 +692,7 @@ get_year_from_date(const char *date)
 }
 
 static void
-parse_metadata_album(json_object *jsonalbum, struct spotify_album *album)
+parse_metadata_album(json_object *jsonalbum, struct spotify_album *album, int max_w)
 {
   json_object* jsonartists;
 
@@ -657,6 +713,9 @@ parse_metadata_album(json_object *jsonalbum, struct spotify_album *album)
   album->release_date = jparse_str_from_obj(jsonalbum, "release_date");
   album->release_date_precision = jparse_str_from_obj(jsonalbum, "release_date_precision");
   album->release_year = get_year_from_date(album->release_date);
+
+  if (max_w > 0)
+    album->artwork_url = get_album_image(jsonalbum, max_w);
 
   // TODO Genre is an array of strings ('genres'), but it is always empty (https://github.com/spotify/web-api/issues/157)
   //album->genre = jparse_str_from_obj(jsonalbum, "genre");
@@ -682,51 +741,6 @@ parse_metadata_playlist(json_object *jsonplaylist, struct spotify_playlist *play
       playlist->tracks_href = jparse_str_from_obj(needle, "href");
       playlist->tracks_count = jparse_int_from_obj(needle, "total");
     }
-}
-
-/*
- * Extracts the owner and the id from a spotify playlist uri
- *
- * Playlist-uri has the following format: spotify:user:[owner]:playlist:[id]
- * Owner and plid must be freed by the caller.
- */
-static int
-get_owner_plid_from_uri(const char *uri, char **owner, char **plid)
-{
-  char *ptr1;
-  char *ptr2;
-  char *tmp;
-  size_t len;
-
-  ptr1 = strchr(uri, ':');
-  if (!ptr1)
-    return -1;
-  ptr1++;
-  ptr1 = strchr(ptr1, ':');
-  if (!ptr1)
-    return -1;
-  ptr1++;
-  ptr2 = strchr(ptr1, ':');
-
-  len = ptr2 - ptr1;
-
-  tmp = malloc(sizeof(char) * (len + 1));
-  strncpy(tmp, ptr1, len);
-  tmp[len] = '\0';
-  *owner = tmp;
-
-  ptr2++;
-  ptr1 = strchr(ptr2, ':');
-  if (!ptr1)
-    {
-      free(tmp);
-      *owner = NULL;
-      return -1;
-    }
-  ptr1++;
-  *plid = strdup(ptr1);
-
-  return 0;
 }
 
 /*
@@ -756,21 +770,19 @@ static char *
 get_playlist_endpoint_uri(const char *uri)
 {
   char *endpoint_uri = NULL;
-  char *owner = NULL;
   char *id = NULL;
   int ret;
 
-  ret = get_owner_plid_from_uri(uri, &owner, &id);
+  ret = get_id_from_uri(uri, &id);
   if (ret < 0)
     {
       DPRINTF(E_LOG, L_SPOTIFY, "Error extracting owner and id from playlist uri '%s'\n", uri);
       goto out;
     }
 
-  endpoint_uri = safe_asprintf(spotify_playlist_uri, owner, id);
+  endpoint_uri = safe_asprintf(spotify_playlist_uri, id);
 
  out:
-  free(owner);
   free(id);
   return endpoint_uri;
 }
@@ -779,21 +791,19 @@ static char *
 get_playlist_tracks_endpoint_uri(const char *uri)
 {
   char *endpoint_uri = NULL;
-  char *owner = NULL;
   char *id = NULL;
   int ret;
 
-  ret = get_owner_plid_from_uri(uri, &owner, &id);
+  ret = get_id_from_uri(uri, &id);
   if (ret < 0)
     {
       DPRINTF(E_LOG, L_SPOTIFY, "Error extracting owner and id from playlist uri '%s'\n", uri);
       goto out;
     }
 
-  endpoint_uri = safe_asprintf(spotify_playlist_tracks_uri, owner, id);
+  endpoint_uri = safe_asprintf(spotify_playlist_tracks_uri, id);
 
  out:
-  free(owner);
   free(id);
   return endpoint_uri;
 }
@@ -861,6 +871,27 @@ get_track_endpoint_uri(const char *uri)
   return endpoint_uri;
 }
 
+static char *
+get_artist_albums_endpoint_uri(const char *uri)
+{
+  char *endpoint_uri = NULL;
+  char *id = NULL;
+  int ret;
+
+  ret = get_id_from_uri(uri, &id);
+  if (ret < 0)
+    {
+      DPRINTF(E_LOG, L_SPOTIFY, "Error extracting id from uri '%s'\n", uri);
+      goto out;
+    }
+
+  endpoint_uri = safe_asprintf(spotify_artist_albums_uri, id);
+
+ out:
+  free(id);
+  return endpoint_uri;
+}
+
 static json_object *
 request_track(const char *path)
 {
@@ -889,7 +920,7 @@ spotifywebapi_oauth_uri_get(const char *redirect_uri)
   ret = ( (keyval_add(&kv, "client_id", spotify_client_id) == 0) &&
 	  (keyval_add(&kv, "response_type", "code") == 0) &&
 	  (keyval_add(&kv, "redirect_uri", redirect_uri) == 0) &&
-	  (keyval_add(&kv, "scope", "user-read-private playlist-read-private user-library-read") == 0) &&
+	  (keyval_add(&kv, "scope", spotify_scope) == 0) &&
 	  (keyval_add(&kv, "show_dialog", "false") == 0) );
   if (!ret)
     {
@@ -976,11 +1007,13 @@ map_track_to_queueitem(struct db_queue_item *item, const struct spotify_track *t
     {
       item->album_artist = safe_strdup(album->artist);
       item->album = safe_strdup(album->name);
+      item->artwork_url = safe_strdup(album->artwork_url);
     }
   else
     {
       item->album_artist = safe_strdup(track->album_artist);
       item->album = safe_strdup(track->album);
+      item->artwork_url = safe_strdup(track->artwork_url);
     }
 
   item->disc = track->disc_number;
@@ -997,7 +1030,7 @@ map_track_to_queueitem(struct db_queue_item *item, const struct spotify_track *t
 }
 
 static int
-queue_add_track(const char *uri)
+queue_add_track(const char *uri, int position, char reshuffle, uint32_t item_id, int *count, int *new_item_id)
 {
   json_object *response;
   struct spotify_track track;
@@ -1009,17 +1042,24 @@ queue_add_track(const char *uri)
   if (!response)
     return -1;
 
-  parse_metadata_track(response, &track);
+  parse_metadata_track(response, &track, ART_DEFAULT_WIDTH);
 
   DPRINTF(E_DBG, L_SPOTIFY, "Got track: '%s' (%s) \n", track.name, track.uri);
 
   map_track_to_queueitem(&item, &track, NULL);
 
-  ret = db_queue_add_start(&queue_add_info);
+  ret = db_queue_add_start(&queue_add_info, position);
   if (ret == 0)
     {
       ret = db_queue_add_item(&queue_add_info, &item);
-      db_queue_add_end(&queue_add_info, ret);
+      ret = db_queue_add_end(&queue_add_info, reshuffle, item_id, ret);
+      if (ret == 0)
+	{
+	  if (count)
+	    *count = queue_add_info.count;
+	  if (new_item_id)
+	    *new_item_id = queue_add_info.new_item_id;
+	}
     }
 
   free_queue_item(&item, 1);
@@ -1043,7 +1083,7 @@ queue_add_album_tracks(json_object *item, int index, int total, void *arg)
 
   param = arg;
 
-  parse_metadata_track(item, &track);
+  parse_metadata_track(item, &track, ART_DEFAULT_WIDTH);
 
   if (!track.uri || !track.is_playable)
     {
@@ -1061,7 +1101,7 @@ queue_add_album_tracks(json_object *item, int index, int total, void *arg)
 }
 
 static int
-queue_add_album(const char *uri)
+queue_add_album(const char *uri, int position, char reshuffle, uint32_t item_id, int *count, int *new_item_id)
 {
   char *album_endpoint_uri = NULL;
   char *endpoint_uri = NULL;
@@ -1071,9 +1111,9 @@ queue_add_album(const char *uri)
 
   album_endpoint_uri = get_album_endpoint_uri(uri);
   json_album = request_endpoint_with_token_refresh(album_endpoint_uri);
-  parse_metadata_album(json_album, &param.album);
+  parse_metadata_album(json_album, &param.album, ART_DEFAULT_WIDTH);
 
-  ret = db_queue_add_start(&param.queue_add_info);
+  ret = db_queue_add_start(&param.queue_add_info, position);
   if (ret < 0)
     goto out;
 
@@ -1081,13 +1121,60 @@ queue_add_album(const char *uri)
 
   ret = request_pagingobject_endpoint(endpoint_uri, queue_add_album_tracks, NULL, NULL, true, &param);
 
-  db_queue_add_end(&param.queue_add_info, ret);
+  ret = db_queue_add_end(&param.queue_add_info, reshuffle, item_id, ret);
+  if (ret == 0 && count)
+    *count = param.queue_add_info.count;
 
  out:
   free(album_endpoint_uri);
   free(endpoint_uri);
   jparse_free(json_album);
 
+  return ret;
+}
+
+static int
+queue_add_albums(json_object *item, int index, int total, void *arg)
+{
+  struct db_queue_add_info *param;
+  struct queue_add_album_param param_add_album;
+  char *endpoint_uri = NULL;
+  int ret;
+
+  param = arg;
+  param_add_album.queue_add_info = *param;
+
+  parse_metadata_album(item, &param_add_album.album, ART_DEFAULT_WIDTH);
+
+  endpoint_uri = get_album_tracks_endpoint_uri(param_add_album.album.uri);
+  ret = request_pagingobject_endpoint(endpoint_uri, queue_add_album_tracks, NULL, NULL, true, &param_add_album);
+
+  *param = param_add_album.queue_add_info;
+
+  free(endpoint_uri);
+  return ret;
+
+}
+
+static int
+queue_add_artist(const char *uri, int position, char reshuffle, uint32_t item_id, int *count, int *new_item_id)
+{
+  struct db_queue_add_info queue_add_info;
+  char *endpoint_uri = NULL;
+  int ret;
+
+  ret = db_queue_add_start(&queue_add_info, position);
+  if (ret < 0)
+    return -1;
+
+  endpoint_uri = get_artist_albums_endpoint_uri(uri);
+  ret = request_pagingobject_endpoint(endpoint_uri, queue_add_albums, NULL, NULL, true, &queue_add_info);
+
+  ret = db_queue_add_end(&queue_add_info, reshuffle, item_id, ret);
+  if (ret == 0 && count)
+    *count = queue_add_info.count;
+
+  free(endpoint_uri);
   return ret;
 }
 
@@ -1108,7 +1195,7 @@ queue_add_playlist_tracks(json_object *item, int index, int total, void *arg)
       return -1;
     }
 
-  parse_metadata_track(jsontrack, &track);
+  parse_metadata_track(jsontrack, &track, ART_DEFAULT_WIDTH);
   track.added_at = jparse_str_from_obj(item, "added_at");
   track.mtime = jparse_time_from_obj(item, "added_at");
 
@@ -1128,13 +1215,13 @@ queue_add_playlist_tracks(json_object *item, int index, int total, void *arg)
 }
 
 static int
-queue_add_playlist(const char *uri)
+queue_add_playlist(const char *uri, int position, char reshuffle, uint32_t item_id, int *count, int *new_item_id)
 {
   char *endpoint_uri;
   struct db_queue_add_info queue_add_info;
   int ret;
 
-  ret = db_queue_add_start(&queue_add_info);
+  ret = db_queue_add_start(&queue_add_info, position);
   if (ret < 0)
     return -1;
 
@@ -1142,7 +1229,9 @@ queue_add_playlist(const char *uri)
 
   ret = request_pagingobject_endpoint(endpoint_uri, queue_add_playlist_tracks, NULL, NULL, true, &queue_add_info);
 
-  db_queue_add_end(&queue_add_info, ret);
+  ret = db_queue_add_end(&queue_add_info, reshuffle, item_id, ret);
+  if (ret == 0 && count)
+    *count = queue_add_info.count;
 
   free(endpoint_uri);
 
@@ -1150,21 +1239,26 @@ queue_add_playlist(const char *uri)
 }
 
 static int
-queue_add(const char *uri)
+queue_add(const char *uri, int position, char reshuffle, uint32_t item_id, int *count, int *new_item_id)
 {
   if (strncasecmp(uri, "spotify:track:", strlen("spotify:track:")) == 0)
     {
-      queue_add_track(uri);
+      queue_add_track(uri, position, reshuffle, item_id, count, new_item_id);
+      return LIBRARY_OK;
+    }
+  else if (strncasecmp(uri, "spotify:artist:", strlen("spotify:artist:")) == 0)
+    {
+      queue_add_artist(uri, position, reshuffle, item_id, count, new_item_id);
       return LIBRARY_OK;
     }
   else if (strncasecmp(uri, "spotify:album:", strlen("spotify:album:")) == 0)
     {
-      queue_add_album(uri);
+      queue_add_album(uri, position, reshuffle, item_id, count, new_item_id);
       return LIBRARY_OK;
     }
   else if (strncasecmp(uri, "spotify:", strlen("spotify:")) == 0)
     {
-      queue_add_playlist(uri);
+      queue_add_playlist(uri, position, reshuffle, item_id, count, new_item_id);
       return LIBRARY_OK;
     }
 
@@ -1192,7 +1286,7 @@ prepare_directories(const char *artist, const char *album)
       DPRINTF(E_LOG, L_SPOTIFY, "Virtual path exceeds PATH_MAX (/spotify:/%s)\n", artist);
       return -1;
     }
-  dir_id = db_directory_addorupdate(virtual_path, 0, DIR_SPOTIFY);
+  dir_id = db_directory_addorupdate(virtual_path, NULL, 0, DIR_SPOTIFY);
   if (dir_id <= 0)
     {
       DPRINTF(E_LOG, L_SPOTIFY, "Could not add or update directory '%s'\n", virtual_path);
@@ -1204,7 +1298,7 @@ prepare_directories(const char *artist, const char *album)
       DPRINTF(E_LOG, L_SPOTIFY, "Virtual path exceeds PATH_MAX (/spotify:/%s/%s)\n", artist, album);
       return -1;
     }
-  dir_id = db_directory_addorupdate(virtual_path, 0, dir_id);
+  dir_id = db_directory_addorupdate(virtual_path, NULL, 0, dir_id);
   if (dir_id <= 0)
     {
       DPRINTF(E_LOG, L_SPOTIFY, "Could not add or update directory '%s'\n", virtual_path);
@@ -1271,6 +1365,9 @@ map_track_to_mfi(struct media_file_info *mfi, const struct spotify_track *track,
   mfi->path = strdup(track->uri);
   mfi->fname = strdup(track->uri);
 
+  mfi->time_modified = track->mtime;
+  mfi->time_added = track->mtime;
+
   if (album)
     {
       mfi->album_artist = safe_strdup(album->artist);
@@ -1278,7 +1375,6 @@ map_track_to_mfi(struct media_file_info *mfi, const struct spotify_track *track,
       mfi->genre = safe_strdup(album->genre);
       mfi->compilation = album->is_compilation;
       mfi->year = album->release_year;
-      mfi->time_modified = album->mtime;
     }
   else
     {
@@ -1292,8 +1388,6 @@ map_track_to_mfi(struct media_file_info *mfi, const struct spotify_track *track,
 	mfi->compilation =  true;
       else
 	mfi->compilation = track->is_compilation;
-
-      mfi->time_modified = time(NULL);
     }
 
   snprintf(virtual_path, PATH_MAX, "/spotify:/%s/%s/%s", mfi->album_artist, mfi->album, mfi->title);
@@ -1378,7 +1472,7 @@ saved_album_add(json_object *item, int index, int total, void *arg)
     }
 
   // Map album information
-  parse_metadata_album(jsonalbum, &album);
+  parse_metadata_album(jsonalbum, &album, 0);
   album.added_at = jparse_str_from_obj(item, "added_at");
   album.mtime = jparse_time_from_obj(item, "added_at");
 
@@ -1395,7 +1489,8 @@ saved_album_add(json_object *item, int index, int total, void *arg)
       if (!jsontrack)
 	break;
 
-      parse_metadata_track(jsontrack, &track);
+      parse_metadata_track(jsontrack, &track, 0);
+      track.mtime = album.mtime;
 
       ret = track_add(&track, &album, NULL, dir_id);
 
@@ -1447,7 +1542,7 @@ saved_playlist_tracks_add(json_object *item, int index, int total, void *arg)
       return -1;
     }
 
-  parse_metadata_track(jsontrack, &track);
+  parse_metadata_track(jsontrack, &track, 0);
   track.added_at = jparse_str_from_obj(item, "added_at");
   track.mtime = jparse_time_from_obj(item, "added_at");
 
@@ -1768,6 +1863,29 @@ spotifywebapi_pl_remove(const char *uri)
   library_exec_async(webapi_pl_remove, strdup(uri));
 }
 
+char *
+spotifywebapi_artwork_url_get(const char *uri, int max_w, int max_h)
+{
+  json_object *response;
+  struct spotify_track track;
+  char *artwork_url;
+
+  response = request_track(uri);
+  if (!response)
+    {
+      return NULL;
+    }
+
+  parse_metadata_track(response, &track, max_w);
+
+  DPRINTF(E_DBG, L_SPOTIFY, "Got track artwork url: '%s' (%s) \n", track.artwork_url, track.uri);
+
+  artwork_url = safe_strdup(track.artwork_url);
+  jparse_free(response);
+
+  return artwork_url;
+}
+
 void
 spotifywebapi_status_info_get(struct spotifywebapi_status_info *info)
 {
@@ -1778,11 +1896,19 @@ spotifywebapi_status_info_get(struct spotifywebapi_status_info *info)
   info->token_valid = token_valid();
   if (spotify_user)
     {
-      memcpy(info->user, spotify_user, (sizeof(info->user) - 1));
+      strncpy(info->user, spotify_user, (sizeof(info->user) - 1));
     }
   if (spotify_user_country)
     {
-      memcpy(info->country, spotify_user_country, (sizeof(info->country) - 1));
+      strncpy(info->country, spotify_user_country, (sizeof(info->country) - 1));
+    }
+  if (spotify_granted_scope)
+    {
+      strncpy(info->granted_scope, spotify_granted_scope, (sizeof(info->granted_scope) - 1));
+    }
+  if (spotify_scope)
+    {
+      strncpy(info->required_scope, spotify_scope, (sizeof(info->required_scope) - 1));
     }
 
   CHECK_ERR(L_SPOTIFY, pthread_mutex_unlock(&token_lck));
@@ -1824,6 +1950,12 @@ spotifywebapi_deinit()
   CHECK_ERR(L_SPOTIFY, pthread_mutex_destroy(&token_lck));
 
   spotify_deinit();
+
+  free(spotify_access_token);
+  free(spotify_refresh_token);
+  free(spotify_granted_scope);
+  free(spotify_user_country);
+  free(spotify_user);
 }
 
 struct library_source spotifyscanner =

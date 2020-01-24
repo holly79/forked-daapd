@@ -1,7 +1,7 @@
 dnl Process this file with autoconf to produce a configure script.
 
 AC_PREREQ([2.60])
-AC_INIT([forked-daapd], [26.4])
+AC_INIT([forked-daapd], [27.0])
 
 AC_CONFIG_SRCDIR([config.h.in])
 AC_CONFIG_MACRO_DIR([m4])
@@ -112,7 +112,7 @@ FORK_FUNC_REQUIRE([COMMON], [GNU libunistring], [LIBUNISTRING], [unistring],
 		[unistring], [u8_strconv_from_locale], [uniconv.h])])
 
 FORK_MODULES_CHECK([FORKED], [ZLIB], [zlib], [deflate], [zlib.h])
-FORK_MODULES_CHECK([FORKED], [CONFUSE], [libconfuse], [cfg_init], [confuse.h])
+FORK_MODULES_CHECK([FORKED], [CONFUSE], [libconfuse >= 3.0], [cfg_init], [confuse.h])
 FORK_MODULES_CHECK([FORKED], [MINIXML], [mxml], [mxmlNewElement], [mxml.h],
 	[AC_CHECK_FUNCS([mxmlGetOpaque] [mxmlGetText] [mxmlGetType] [mxmlGetFirstChild])])
 
@@ -122,6 +122,8 @@ FORK_MODULES_CHECK([COMMON], [SQLITE3], [sqlite3 >= 3.5.0],
 	[dnl Check that SQLite3 has the unlock notify API built-in
 	 AC_CHECK_FUNC([[sqlite3_unlock_notify]], [],
 		[AC_MSG_ERROR([[SQLite3 was built without unlock notify support]])])
+	 dnl Check for sqlite3_expanded_sql (optional)
+	 AC_CHECK_FUNCS([sqlite3_expanded_sql])
 	 dnl Check that SQLite3 has been built with threadsafe operations
 	 AC_MSG_CHECKING([[if SQLite3 was built with threadsafe operations support]])
 	 AC_RUN_IFELSE([AC_LANG_PROGRAM([[#include <sqlite3.h>
@@ -208,7 +210,7 @@ AC_ARG_WITH([libav], [AS_HELP_STRING([--with-libav],
 	[[LIBAV=-libav]], [[LIBAV=]])
 dnl libav/ffmpeg requires many feature checks
 FORK_MODULES_CHECK([FORKED], [LIBAV],
-	[libavformat$LIBAV libavcodec$LIBAV libswscale$LIBAV libavutil$LIBAV libavfilter$LIBAV],
+	[libavformat$LIBAV libavcodec$LIBAV libavutil$LIBAV libavfilter$LIBAV],
 	[av_init_packet], [libavcodec/avcodec.h],
 	[dnl Checks for misc libav and ffmpeg API differences
 	 AC_MSG_CHECKING([whether libav libraries are ffmpeg])
@@ -229,44 +231,14 @@ FORK_MODULES_CHECK([FORKED], [LIBAV],
 		[libavutil/avutil.h])
 	 FORK_CHECK_DECLS([avformat_network_init],
 		[libavformat/avformat.h])
-	 dnl Check if we have modern or legacy AV api
-	 FORK_CHECK_DECLS([avcodec_send_packet, avcodec_parameters_from_context],
-		[libavcodec/avcodec.h],	[[libav_modern_api=yes]], [[libav_modern_api=no]])
-	 dnl The below we need to know only if we are going to use the legacy AV api
-	 FORK_CHECK_DECLS([av_buffersrc_add_frame_flags],
-		[libavfilter/buffersrc.h])
-	 FORK_CHECK_DECLS([av_buffersink_get_frame],
-		[libavfilter/buffersink.h])
-	 FORK_CHECK_DECLS([avfilter_graph_parse_ptr],
-		[libavfilter/avfilter.h])
-	 FORK_CHECK_DECLS([av_packet_unref],
-		[libavcodec/avcodec.h])
-	 FORK_CHECK_DECLS([av_packet_rescale_ts],
-		[libavcodec/avcodec.h])
-	 FORK_CHECK_DECLS([avformat_alloc_output_context2],
-		[libavformat/avformat.h])
-	 FORK_CHECK_DECLS([av_frame_alloc],
-		[libavutil/frame.h])
-	 FORK_CHECK_DECLS([av_frame_get_best_effort_timestamp],
-		[libavutil/frame.h])
-	 FORK_CHECK_DECLS([av_image_fill_arrays],
-		[libavutil/imgutils.h])
-	 FORK_CHECK_DECLS([av_image_get_buffer_size],
-		[libavutil/imgutils.h])
-	 AC_CHECK_HEADERS([libavutil/channel_layout.h libavutil/mathematics.h])
 	])
-dnl Option to choose old ffmpeg/libav API even if modern api was found
-FORK_ARG_DISABLE([use of ffmpeg/libav API with avcodec_send_packet() and family],
-	[avcodecsend], [USE_AVCODEC_SEND])
-AM_CONDITIONAL([COND_FFMPEG_LEGACY],
-	[[test "x$libav_modern_api" = "xno" || test "x$enable_avcodecsend" = "xno" ]])
 
 AC_CHECK_SIZEOF([void *])
 
 dnl --- Begin configuring the options ---
 dnl ALSA
 FORK_ARG_WITH_CHECK([FORKED_OPTS], [ALSA support], [alsa], [ALSA],
-	[alsa], [snd_mixer_open], [asoundlib.h])
+	[alsa], [snd_mixer_open], [alsa/asoundlib.h])
 AM_CONDITIONAL([COND_ALSA], [[test "x$with_alsa" = "xyes"]])
 
 dnl PULSEAUDIO

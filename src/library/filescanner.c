@@ -76,6 +76,7 @@
 #define F_SCAN_RESCAN  (1 << 1)
 #define F_SCAN_FAST    (1 << 2)
 #define F_SCAN_MOVED   (1 << 3)
+#define F_SCAN_METARESCAN  (1 << 4)
 
 #define F_SCAN_TYPE_FILE         (1 << 0)
 #define F_SCAN_TYPE_PODCAST      (1 << 1)
@@ -96,6 +97,7 @@ enum file_type {
   FILE_CTRL_LASTFM,
   FILE_CTRL_SPOTIFY,
   FILE_CTRL_INITSCAN,
+  FILE_CTRL_METASCAN, // forced scan for meta, preserves existing db records
   FILE_CTRL_FULLSCAN,
 };
 
@@ -366,6 +368,9 @@ file_type_get(const char *path) {
   if (strcasecmp(ext, ".init-rescan") == 0)
     return FILE_CTRL_INITSCAN;
 
+  if (strcasecmp(ext, ".meta-rescan") == 0)
+    return FILE_CTRL_METASCAN;
+
   if (strcasecmp(ext, ".full-rescan") == 0)
     return FILE_CTRL_FULLSCAN;
 
@@ -477,9 +482,12 @@ process_regular_file(const char *file, struct stat *sb, int type, int flags, int
 
   // Will return 0 if file is not in library or if file mtime is newer than library timestamp
   // - note if mtime is 0 then we always scan the file
-  ret = db_file_ping_bypath(file, sb->st_mtime);
-  if ((sb->st_mtime != 0) && (ret != 0))
-    return;
+  if (!(flags & F_SCAN_METARESCAN))
+    {
+      ret = db_file_ping_bypath(file, sb->st_mtime);
+      if ((sb->st_mtime != 0) && (ret != 0))
+        return;
+    }
 
   // File is new or modified - (re)scan metadata and update file in library
   memset(&mfi, 0, sizeof(struct media_file_info));
@@ -509,14 +517,18 @@ process_regular_file(const char *file, struct stat *sb, int type, int flags, int
   else
     {
       mfi.data_kind = DATA_KIND_FILE;
+      mfi.file_size = sb->st_size;
 
       if (type & F_SCAN_TYPE_AUDIOBOOK)
 	mfi.media_kind = MEDIA_KIND_AUDIOBOOK;
       else if (type & F_SCAN_TYPE_PODCAST)
 	mfi.media_kind = MEDIA_KIND_PODCAST;
 
-      mfi.compilation = (type & F_SCAN_TYPE_COMPILATION);
-      mfi.file_size = sb->st_size;
+      if (type & F_SCAN_TYPE_COMPILATION)
+	{
+	  mfi.compilation = 1;
+	  mfi.album_artist = safe_strdup(cfg_getstr(cfg_getsec(cfg, "library"), "compilation_artist"));
+	}
 
       ret = scan_metadata_ffmpeg(file, &mfi);
       if (ret < 0)
@@ -618,6 +630,15 @@ process_file(char *file, struct stat *sb, int type, int flags, int dir_id)
 	DPRINTF(E_LOG, L_SCAN, "Startup rescan triggered, found init-rescan file: %s\n", file);
 
 	library_rescan();
+	break;
+
+      case FILE_CTRL_METASCAN:
+	if (flags & F_SCAN_BULK)
+	  break;
+
+	DPRINTF(E_LOG, L_SCAN, "Meta rescan triggered, found meta-rescan file: %s\n", file);
+
+	library_metarescan();
 	break;
 
       case FILE_CTRL_FULLSCAN:
@@ -749,7 +770,7 @@ process_directory(char *path, int parent_id, int flags)
   if (ret < 0)
     return;
 
-  dir_id = db_directory_addorupdate(virtual_path, 0, parent_id);
+  dir_id = db_directory_addorupdate(virtual_path, path, 0, parent_id);
   if (dir_id <= 0)
     {
       DPRINTF(E_LOG, L_SCAN, "Insert or update of directory failed '%s'\n", virtual_path);
@@ -876,7 +897,7 @@ process_parent_directories(char *path)
       if (ret < 0)
 	return 0;
 
-      dir_id = db_directory_addorupdate(virtual_path, 0, dir_id);
+      dir_id = db_directory_addorupdate(virtual_path, buf, 0, dir_id);
       if (dir_id <= 0)
 	{
 	  DPRINTF(E_LOG, L_SCAN, "Insert or update of directory failed '%s'\n", virtual_path);
@@ -1627,6 +1648,24 @@ filescanner_rescan()
 }
 
 static int
+filescanner_metarescan()
+{
+  DPRINTF(E_LOG, L_SCAN, "meta rescan triggered\n");
+
+  inofd_event_unset(); // Clears all inotify watches
+  db_watch_clear();
+  inofd_event_set();
+  bulk_scan(F_SCAN_BULK | F_SCAN_METARESCAN);
+
+  if (!library_is_exiting())
+    {
+      /* Enable inotify */
+      event_add(inoev, NULL);
+    }
+  return 0;
+}
+
+static int
 filescanner_fullrescan()
 {
   DPRINTF(E_LOG, L_SCAN, "Full rescan triggered\n");
@@ -1673,10 +1712,14 @@ map_media_file_to_queue_item(struct db_queue_item *queue_item, struct media_file
   queue_item->track = mfi->track;
   queue_item->disc = mfi->disc;
   //queue_item->artwork_url
+  queue_item->type = safe_strdup(mfi->type);
+  queue_item->channels = mfi->channels;
+  queue_item->samplerate = mfi->samplerate;
+  queue_item->bitrate = mfi->bitrate;
 }
 
 static int
-queue_add_stream(const char *path)
+queue_add_stream(const char *path, int position, char reshuffle, uint32_t item_id, int *count, int *new_item_id)
 {
   struct media_file_info mfi;
   struct db_queue_item item;
@@ -1686,15 +1729,21 @@ queue_add_stream(const char *path)
   memset(&mfi, 0, sizeof(struct media_file_info));
 
   scan_metadata_stream(path, &mfi);
-  unicode_fixup_mfi(&mfi);
 
   map_media_file_to_queue_item(&item, &mfi);
 
-  ret = db_queue_add_start(&queue_add_info);
+  ret = db_queue_add_start(&queue_add_info, position);
   if (ret == 0)
     {
       ret = db_queue_add_item(&queue_add_info, &item);
-      db_queue_add_end(&queue_add_info, ret);
+      ret = db_queue_add_end(&queue_add_info, reshuffle, item_id, ret);
+      if (ret == 0)
+	{
+	  if (count)
+	    *count = queue_add_info.count;
+	  if (new_item_id)
+	    *new_item_id = queue_add_info.new_item_id;
+	}
     }
 
   free_queue_item(&item, 1);
@@ -1704,11 +1753,11 @@ queue_add_stream(const char *path)
 }
 
 static int
-queue_add(const char *uri)
+queue_add(const char *uri, int position, char reshuffle, uint32_t item_id, int *count, int *new_item_id)
 {
-  if (strncasecmp(uri, "http://", strlen("http://")) == 0)
+  if (strncasecmp(uri, "http://", strlen("http://")) == 0 || strncasecmp(uri, "https://", strlen("https://")) == 0)
     {
-      queue_add_stream(uri);
+      queue_add_stream(uri, position, reshuffle, item_id, count, new_item_id);
       return LIBRARY_OK;
     }
 
@@ -1893,7 +1942,7 @@ playlist_add_files(FILE *fp, int pl_id, const char *virtual_path)
 	  DPRINTF(E_DBG, L_SCAN, "Item '%s' added to playlist (id = %d)\n", dbmfi.path, pl_id);
 	}
     }
-  else if (strncasecmp(virtual_path, "/http://", strlen("/http://")) == 0)
+  else if (strncasecmp(virtual_path, "/http://", strlen("/http://")) == 0 || strncasecmp(virtual_path, "/https://", strlen("/https://")) == 0)
     {
       path = (virtual_path + 1);
 
@@ -2123,6 +2172,7 @@ struct library_source filescanner =
   .deinit = filescanner_deinit,
   .initscan = filescanner_initscan,
   .rescan = filescanner_rescan,
+  .metarescan = filescanner_metarescan,
   .fullrescan = filescanner_fullrescan,
   .playlist_add = playlist_add,
   .playlist_remove = playlist_remove,

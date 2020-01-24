@@ -25,7 +25,7 @@
 -->
 <nav class="navbar">
   <div class="navbar-brand">
-    <b class="navbar-item">forked-daapd</b>
+    <a class="navbar-item has-text-black" href="/">forked-daapd</a>
     <a class="navbar-item" href="https://github.com/ejurgensen/forked-daapd" title="GitHub"><i class="fab fa-github"></i></a>
   </div>
 </nav>
@@ -97,6 +97,7 @@
       <div class="column is-7 content">
         <a class="button" v-on:click="update" v-show="!library.updating">Update library</a>
         <p v-show="library.updating">Update in progress ...</p>
+        <a class="button" v-on:click="update_meta" v-show="!library.updating">Rescan library</a>
       </div>
     </div>
 
@@ -212,6 +213,7 @@
           </div>
           <div v-show="spotify.webapi_token_valid">
             <p><b>Spotify Web API</b>: access authorized for <b>{{ spotify.webapi_user }}</b></p>
+            <p v-if="spotify_missing_scope.length > 0" class="help is-danger">Please reauthorize Web API access to grant forked-daapd the following additional access rights: <b>{{ spotify_missing_scope | join }}</b></p>
             <a class="button" v-bind:href="spotify.oauth_uri">Reauthorize Web API access</a>
           </div>
         </div>

@@ -159,6 +159,7 @@ process_regular_file(int pl_id, char *path)
     {
       if (qp.results == 1)
 	{
+	  free(winner); // This is just here to keep scan-build happy
 	  winner = strdup(dbpath);
 	  break;
 	}
@@ -326,8 +327,8 @@ scan_playlist(const char *file, time_t mtime, int dir_id)
 
       /* For pls files we are only interested in the part after the FileX= entry */
       path = NULL;
-      if ((pl_format == PLAYLIST_PLS) && (strncasecmp(buf, "file", strlen("file")) == 0))
-	path = strchr(buf, '=') + 1;
+      if ((pl_format == PLAYLIST_PLS) && (strncasecmp(buf, "file", strlen("file")) == 0) && (path = strchr(buf, '=')))
+	path++;
       else if (pl_format == PLAYLIST_M3U)
 	path = buf;
 

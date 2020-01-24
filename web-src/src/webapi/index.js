@@ -13,12 +13,24 @@ export default {
     return axios.get('/api/config')
   },
 
+  settings () {
+    return axios.get('/api/settings')
+  },
+
+  settings_update (categoryName, option) {
+    return axios.put('/api/settings/' + categoryName + '/' + option.name, option)
+  },
+
   library_stats () {
     return axios.get('/api/library')
   },
 
   library_update () {
-    return axios.get('/api/update')
+    return axios.put('/api/update')
+  },
+
+  library_rescan () {
+    return axios.put('/api/rescan')
   },
 
   library_count (expression) {
@@ -42,15 +54,82 @@ export default {
   },
 
   queue_add (uri) {
-    return axios.post('/api/queue/items/add?uris=' + uri)
+    return axios.post('/api/queue/items/add?uris=' + uri).then((response) => {
+      store.dispatch('add_notification', { text: response.data.count + ' tracks appended to queue', type: 'info', timeout: 2000 })
+      return Promise.resolve(response)
+    })
+  },
+
+  queue_add_next (uri) {
+    var position = 0
+    if (store.getters.now_playing && store.getters.now_playing.id) {
+      position = store.getters.now_playing.position + 1
+    }
+    return axios.post('/api/queue/items/add?uris=' + uri + '&position=' + position).then((response) => {
+      store.dispatch('add_notification', { text: response.data.count + ' tracks appended to queue', type: 'info', timeout: 2000 })
+      return Promise.resolve(response)
+    })
+  },
+
+  queue_expression_add (expression) {
+    var options = {}
+    options.expression = expression
+
+    return axios.post('/api/queue/items/add', undefined, { params: options }).then((response) => {
+      store.dispatch('add_notification', { text: response.data.count + ' tracks appended to queue', type: 'info', timeout: 2000 })
+      return Promise.resolve(response)
+    })
+  },
+
+  queue_expression_add_next (expression) {
+    var options = {}
+    options.expression = expression
+    options.position = 0
+    if (store.getters.now_playing && store.getters.now_playing.id) {
+      options.position = store.getters.now_playing.position + 1
+    }
+
+    return axios.post('/api/queue/items/add', undefined, { params: options }).then((response) => {
+      store.dispatch('add_notification', { text: response.data.count + ' tracks appended to queue', type: 'info', timeout: 2000 })
+      return Promise.resolve(response)
+    })
+  },
+
+  queue_save_playlist (name) {
+    return axios.post('/api/queue/save', undefined, { params: { 'name': name } }).then((response) => {
+      store.dispatch('add_notification', { text: 'Queue saved to playlist "' + name + '"', type: 'info', timeout: 2000 })
+      return Promise.resolve(response)
+    })
   },
 
   player_status () {
     return axios.get('/api/player')
   },
 
-  player_play () {
-    return axios.put('/api/player/play')
+  player_play_uri (uris, shuffle, position = undefined) {
+    var options = {}
+    options.uris = uris
+    options.shuffle = shuffle ? 'true' : 'false'
+    options.clear = 'true'
+    options.playback = 'start'
+    options.playback_from_position = position
+
+    return axios.post('/api/queue/items/add', undefined, { params: options })
+  },
+
+  player_play_expression (expression, shuffle, position = undefined) {
+    var options = {}
+    options.expression = expression
+    options.shuffle = shuffle ? 'true' : 'false'
+    options.clear = 'true'
+    options.playback = 'start'
+    options.playback_from_position = position
+
+    return axios.post('/api/queue/items/add', undefined, { params: options })
+  },
+
+  player_play (options = {}) {
+    return axios.put('/api/player/play', undefined, { params: options })
   },
 
   player_playpos (position) {
@@ -63,6 +142,10 @@ export default {
 
   player_pause () {
     return axios.put('/api/player/pause')
+  },
+
+  player_stop () {
+    return axios.put('/api/player/stop')
   },
 
   player_next () {
@@ -130,8 +213,66 @@ export default {
     return axios.get('/api/library/albums/' + albumId + '/tracks')
   },
 
+  library_genres () {
+    return axios.get('/api/library/genres')
+  },
+
+  library_genre (genre) {
+    var genreParams = {
+      'type': 'albums',
+      'media_kind': 'music',
+      'expression': 'genre is "' + genre + '"'
+    }
+    return axios.get('/api/search', {
+      params: genreParams
+    })
+  },
+
+  library_genre_tracks (genre) {
+    var genreParams = {
+      'type': 'tracks',
+      'media_kind': 'music',
+      'expression': 'genre is "' + genre + '"'
+    }
+    return axios.get('/api/search', {
+      params: genreParams
+    })
+  },
+
+  library_artist_tracks (artist) {
+    if (artist) {
+      var artistParams = {
+        'type': 'tracks',
+        'expression': 'songartistid is "' + artist + '"'
+      }
+      return axios.get('/api/search', {
+        params: artistParams
+      })
+    }
+  },
+
   library_podcasts () {
     return axios.get('/api/library/albums?media_kind=podcast')
+  },
+
+  library_podcasts_new_episodes () {
+    var episodesParams = {
+      'type': 'tracks',
+      'expression': 'media_kind is podcast and play_count = 0 ORDER BY time_added DESC'
+    }
+    return axios.get('/api/search', {
+      params: episodesParams
+    })
+  },
+
+  library_podcast_episodes (albumId) {
+    var episodesParams = {
+      'type': 'tracks',
+      'expression': 'media_kind is podcast and songalbumid is "' + albumId + '" ORDER BY time_added DESC'
+    }
+    return axios.get('/api/search', {
+      params: episodesParams
+    })
   },
 
   library_audiobooks () {
@@ -150,6 +291,21 @@ export default {
     return axios.get('/api/library/playlists/' + playlistId + '/tracks')
   },
 
+  library_track (trackId) {
+    return axios.get('/api/library/tracks/' + trackId)
+  },
+
+  library_track_update (trackId, attributes = {}) {
+    return axios.put('/api/library/tracks/' + trackId, undefined, { params: attributes })
+  },
+
+  library_files (directory = undefined) {
+    var filesParams = { 'directory': directory }
+    return axios.get('/api/library/files', {
+      params: filesParams
+    })
+  },
+
   search (searchParams) {
     return axios.get('/api/search', {
       params: searchParams
@@ -158,5 +314,15 @@ export default {
 
   spotify () {
     return axios.get('/api/spotify')
+  },
+
+  artwork_url_append_size_params (artworkUrl, maxwidth = 600, maxheight = 600) {
+    if (artworkUrl && artworkUrl.startsWith('/')) {
+      if (artworkUrl.includes('?')) {
+        return artworkUrl + '&maxwidth=' + maxwidth + '&maxheight=' + maxheight
+      }
+      return artworkUrl + '?maxwidth=' + maxwidth + '&maxheight=' + maxheight
+    }
+    return artworkUrl
   }
 }

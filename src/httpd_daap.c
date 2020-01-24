@@ -42,6 +42,7 @@
 #include <unistd.h>
 
 #include <event2/event.h>
+#include <event2/bufferevent.h>
 
 #include "httpd_daap.h"
 #include "logger.h"
@@ -326,6 +327,7 @@ update_fail_cb(struct evhttp_connection *evcon, void *arg)
   if (evc)
     evhttp_connection_set_closecb(evc, NULL, NULL);
 
+  evhttp_request_free(ur->req);
   update_remove(ur);
 }
 
@@ -821,10 +823,11 @@ daap_reply_server_info(struct httpd_request *hreq)
 
   dmap_add_short(content, "ated", 7);        // daap.supportsextradata
 
-  /* Sub-optimal user-agent sniffing to solve the problem that iTunes 12.1
-   * does not work if we announce support for groups.
-   */ 
+  // Sub-optimal user-agent sniffing to solve the problem that iTunes 12.1 and
+  // Apple Music do not work if we announce support for groups
   if (hreq->user_agent && (strncmp(hreq->user_agent, "iTunes", strlen("iTunes")) == 0))
+    dmap_add_short(content, "asgr", 0);      // daap.supportsgroups (1=artists, 2=albums, 3=both)
+  else if (hreq->user_agent && (strncmp(hreq->user_agent, "Music", strlen("Music")) == 0))
     dmap_add_short(content, "asgr", 0);      // daap.supportsgroups (1=artists, 2=albums, 3=both)
   else
     dmap_add_short(content, "asgr", 3);      // daap.supportsgroups (1=artists, 2=albums, 3=both)
@@ -996,6 +999,7 @@ daap_reply_update(struct httpd_request *hreq)
 {
   struct daap_update_request *ur;
   struct evhttp_connection *evcon;
+  struct bufferevent *bufev;
   const char *param;
   int reqd_rev;
   int ret;
@@ -1075,7 +1079,18 @@ daap_reply_update(struct httpd_request *hreq)
    */
   evcon = evhttp_request_get_connection(hreq->req);
   if (evcon)
-    evhttp_connection_set_closecb(evcon, update_fail_cb, ur);
+    {
+      evhttp_connection_set_closecb(evcon, update_fail_cb, ur);
+
+      // This is a workaround for some versions of libevent (2.0, but possibly
+      // also 2.1) that don't detect if the client hangs up, and thus don't
+      // clean up and never call update_fail_cb(). See github issue #870 and
+      // https://github.com/libevent/libevent/issues/666. It should probably be
+      // removed again in the future. The workaround is also present in dacp.c
+      bufev = evhttp_connection_get_bufferevent(evcon);
+      if (bufev)
+	bufferevent_enable(bufev, EV_READ);
+    }
 
   return DAAP_REPLY_NONE;
 }
@@ -1095,7 +1110,7 @@ daap_reply_dblist(struct httpd_request *hreq)
   char *name;
   char *name_radio;
   size_t len;
-  int count;
+  uint32_t count = 0;
 
   name = cfg_getstr(cfg_getsec(cfg, "library"), "name");
   name_radio = cfg_getstr(cfg_getsec(cfg, "library"), "name_radio");
@@ -1111,10 +1126,10 @@ daap_reply_dblist(struct httpd_request *hreq)
   dmap_add_int(item, "mdbk", 1);
   dmap_add_int(item, "aeCs", 1);
   dmap_add_string(item, "minm", name);
-  count = db_files_get_count();
-  dmap_add_int(item, "mimc", count);
-  count = db_pl_get_count(); // TODO Don't count empty smart playlists, because they get excluded in aply
-  dmap_add_int(item, "mctc", count);
+  db_files_get_count(&count, NULL, NULL);
+  dmap_add_int(item, "mimc", (int)count);
+  db_pl_get_count(&count); // TODO Don't count empty smart playlists, because they get excluded in aply
+  dmap_add_int(item, "mctc", (int)count);
 //  dmap_add_int(content, "aeMk", 0x405);   // com.apple.itunes.extended-media-kind (OR of all in library)
   dmap_add_int(item, "meds", 3);
 
@@ -1132,8 +1147,8 @@ daap_reply_dblist(struct httpd_request *hreq)
   dmap_add_int(item, "mdbk", 0x64);
   dmap_add_int(item, "aeCs", 0);
   dmap_add_string(item, "minm", name_radio);
-  count = db_pl_get_count();       // TODO This counts too much, should only include stream playlists
-  dmap_add_int(item, "mimc", count);
+  db_pl_get_count(&count); // TODO This counts too much, should only include stream playlists
+  dmap_add_int(item, "mimc", (int)count);
   dmap_add_int(item, "mctc", 0);
   dmap_add_int(item, "aeMk", 1);   // com.apple.itunes.extended-media-kind (OR of all in library)
   dmap_add_int(item, "meds", 3);
@@ -1428,8 +1443,7 @@ daap_reply_playlists(struct httpd_request *hreq)
     }
 
   query_params_set(&qp, NULL, hreq, Q_PL);
-  if (qp.sort == S_NONE)
-    qp.sort = S_PLAYLIST;
+  qp.sort = S_PLAYLIST; // Only S_PLAYLIST (and S_NONE) works for Q_PL
 
   CHECK_NULL(L_DAAP, playlistlist = evbuffer_new());
   CHECK_NULL(L_DAAP, playlist = evbuffer_new());
@@ -1465,7 +1479,7 @@ daap_reply_playlists(struct httpd_request *hreq)
     }
 
   npls = 0;
-  while (((ret = db_query_fetch_pl(&qp, &dbpli, 1)) == 0) && (dbpli.id))
+  while (((ret = db_query_fetch_pl(&qp, &dbpli)) == 0) && (dbpli.id))
     {
       plid = 1;
       if (safe_atoi32(dbpli.id, &plid) != 0)
@@ -1707,6 +1721,9 @@ daap_reply_groups(struct httpd_request *hreq)
       for (i = 0; i < nmeta; i++)
 	{
 	  df = meta[i];
+	  if (!df)
+	    continue;
+
 	  dfm = df->dfm;
 
 	  /* dmap.itemcount - always added */

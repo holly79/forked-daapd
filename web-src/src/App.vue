@@ -3,7 +3,8 @@
     <navbar-top />
     <vue-progress-bar class="fd-progress-bar" />
     <transition name="fade">
-      <router-view v-show="!show_burger_menu" />
+      <!-- Setting v-show to true on the router-view tag avoids jumpiness during transitions -->
+      <router-view v-show="true" />
     </transition>
     <notifications v-show="!show_burger_menu" />
     <navbar-bottom v-show="!show_burger_menu" />
@@ -25,7 +26,8 @@ export default {
 
   data () {
     return {
-      token_timer_id: 0
+      token_timer_id: 0,
+      reconnect_attempts: 0
     }
   },
 
@@ -85,19 +87,26 @@ export default {
 
       const vm = this
 
+      var protocol = 'ws://'
+      if (window.location.protocol === 'https:') {
+        protocol = 'wss://'
+      }
+
       var socket = new ReconnectingWebSocket(
-        'ws://' + window.location.hostname + ':' + vm.$store.state.config.websocket_port,
+        protocol + window.location.hostname + ':' + vm.$store.state.config.websocket_port,
         'notify',
-        { reconnectInterval: 5000 }
+        { reconnectInterval: 3000 }
       )
 
       socket.onopen = function () {
         vm.$store.dispatch('add_notification', { text: 'Connection to server established', type: 'primary', topic: 'connection', timeout: 2000 })
-        socket.send(JSON.stringify({ notify: ['update', 'player', 'options', 'outputs', 'volume', 'spotify'] }))
+        vm.reconnect_attempts = 0
+        socket.send(JSON.stringify({ notify: ['update', 'database', 'player', 'options', 'outputs', 'volume', 'spotify'] }))
 
         vm.update_outputs()
         vm.update_player_status()
         vm.update_library_stats()
+        vm.update_settings()
         vm.update_queue()
         vm.update_spotify()
       }
@@ -105,11 +114,12 @@ export default {
         // vm.$store.dispatch('add_notification', { text: 'Connection closed', type: 'danger', timeout: 2000 })
       }
       socket.onerror = function () {
-        vm.$store.dispatch('add_notification', { text: 'Connection lost. Reconnecting ...', type: 'danger', topic: 'connection' })
+        vm.reconnect_attempts++
+        vm.$store.dispatch('add_notification', { text: 'Connection lost. Reconnecting ... (' + vm.reconnect_attempts + ')', type: 'danger', topic: 'connection' })
       }
       socket.onmessage = function (response) {
         var data = JSON.parse(response.data)
-        if (data.notify.includes('update')) {
+        if (data.notify.includes('update') || data.notify.includes('database')) {
           vm.update_library_stats()
         }
         if (data.notify.includes('player') || data.notify.includes('options') || data.notify.includes('volume')) {
@@ -157,27 +167,28 @@ export default {
       })
     },
 
+    update_settings: function () {
+      webapi.settings().then(({ data }) => {
+        this.$store.commit(types.UPDATE_SETTINGS, data)
+      })
+    },
+
     update_spotify: function () {
       webapi.spotify().then(({ data }) => {
         this.$store.commit(types.UPDATE_SPOTIFY, data)
 
         if (this.token_timer_id > 0) {
-          console.log('clear old timer: ' + this.token_timer_id)
           window.clearTimeout(this.token_timer_id)
           this.token_timer_id = 0
         }
         if (data.webapi_token_expires_in > 0 && data.webapi_token) {
           this.token_timer_id = window.setTimeout(this.update_spotify, 1000 * data.webapi_token_expires_in)
-          console.log('new timer: ' + this.token_timer_id + ', expires in ' + data.webapi_token_expires_in + ' seconds')
         }
       })
     }
   },
 
   watch: {
-    '$route' (to, from) {
-      this.$store.commit(types.SHOW_BURGER_MENU, false)
-    },
     'show_burger_menu' () {
       if (this.show_burger_menu) {
         document.querySelector('html').classList.add('is-clipped')

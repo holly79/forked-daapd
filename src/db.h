@@ -71,6 +71,7 @@ enum query_type {
 #define DB_ADMIN_SCHEMA_VERSION "schema_version"
 #define DB_ADMIN_QUEUE_VERSION "queue_version"
 #define DB_ADMIN_DB_UPDATE "db_update"
+#define DB_ADMIN_DB_MODIFIED "db_modified"
 #define DB_ADMIN_START_TIME "start_time"
 #define DB_ADMIN_LASTFM_SESSION_KEY "lastfm_sk"
 #define DB_ADMIN_SPOTIFY_REFRESH_TOKEN "spotify_refresh_token"
@@ -93,6 +94,7 @@ struct query_params {
 
   char *having;
   char *order;
+  char *group;
 
   char *filter;
 
@@ -140,12 +142,16 @@ db_data_kind_label(enum data_kind data_kind);
 
 /* Note that fields marked as integers in the metadata map in filescanner_ffmpeg must be uint32_t here */
 struct media_file_info {
+  uint32_t id;
+
   char *path;
-  uint32_t index;
+  char *virtual_path;
   char *fname;
+  uint32_t directory_id; /* Id of directory */
   char *title;
   char *artist;
   char *album;
+  char *album_artist;
   char *genre;
   char *comment;
   char *type;            /* daap.songformat */
@@ -157,9 +163,11 @@ struct media_file_info {
 
   uint32_t bitrate;
   uint32_t samplerate;
+  uint32_t channels;
   uint32_t song_length;
   int64_t file_size;
   uint32_t year;         /* TDRC */
+  uint32_t date_released;
 
   uint32_t track;        /* TRCK */
   uint32_t total_tracks;
@@ -167,44 +175,44 @@ struct media_file_info {
   uint32_t disc;         /* TPOS */
   uint32_t total_discs;
 
+  uint32_t bpm;          /* TBPM */
+  uint32_t compilation;
+  uint32_t artwork;
+  uint32_t rating;
+
+  uint32_t play_count;
+  uint32_t skip_count;
+  uint32_t seek;
+
+  uint32_t data_kind;    /* dmap.datakind (asdk) */
+  uint32_t media_kind;
+  uint32_t item_kind;    /* song or movie */
+
+  char *description;     /* daap.songdescription */
+
+  uint32_t db_timestamp;
   uint32_t time_added;   /* FIXME: time_t */
   uint32_t time_modified;
   uint32_t time_played;
-
-  uint32_t play_count;
-  uint32_t seek;
-  uint32_t rating;
-  uint32_t db_timestamp;
+  uint32_t time_skipped;
 
   uint32_t disabled;
-  uint32_t bpm;          /* TBPM */
 
-  uint32_t id;
-
-  char *description;     /* daap.songdescription */
+  uint64_t sample_count; //TODO [unused] sample count is never set and therefor always 0
   char *codectype;       /* song.codectype, 4 chars max (32 bits) */
 
-  uint32_t item_kind;    /* song or movie */
-  uint32_t data_kind;    /* dmap.datakind (asdk) */
-  uint64_t sample_count; //TODO [unused] sample count is never set and therefor always 0
-  uint32_t compilation;
-  char artwork;
+  uint32_t idx;
 
-  /* iTunes 5+ */
-  uint32_t contentrating;
+  uint32_t has_video;    /* iTunes 6.0.2 */
+  uint32_t contentrating;/* iTunes 5+ */
 
-  /* iTunes 6.0.2 */
-  uint32_t has_video;
   uint32_t bits_per_sample;
 
-  uint32_t media_kind;
-  uint32_t tv_episode_sort;
-  uint32_t tv_season_num;
   char *tv_series_name;
   char *tv_episode_num_str; /* com.apple.itunes.episode-num-str, used as a unique episode identifier */
   char *tv_network_name;
-
-  char *album_artist;
+  uint32_t tv_episode_sort;
+  uint32_t tv_season_num;
 
   int64_t songartistid;
   int64_t songalbumid;
@@ -212,16 +220,8 @@ struct media_file_info {
   char *title_sort;
   char *artist_sort;
   char *album_sort;
-  char *composer_sort;
   char *album_artist_sort;
-
-  char *virtual_path;
-
-  uint32_t directory_id; /* Id of directory */
-  uint32_t date_released;
-
-  uint32_t skip_count;
-  uint32_t time_skipped;
+  char *composer_sort;
 };
 
 #define mfi_offsetof(field) offsetof(struct media_file_info, field)
@@ -239,8 +239,6 @@ struct playlist_info {
   uint32_t id;           /* integer id (miid) */
   char *title;           /* playlist name as displayed in iTunes (minm) */
   enum pl_type type;     /* see PL_ types */
-  uint32_t items;        /* number of items (mimc) */
-  uint32_t streams;      /* number of internet streams */
   char *query;           /* where clause if type 1 (MSPS) */
   uint32_t db_timestamp; /* time last updated */
   uint32_t disabled;
@@ -252,6 +250,9 @@ struct playlist_info {
   uint32_t directory_id; /* Id of directory */
   char *query_order;     /* order by clause if it is a smart playlist */
   int32_t query_limit;   /* limit if it is a smart playlist */
+  uint32_t media_kind;
+  uint32_t items;        /* number of items (mimc) */
+  uint32_t streams;      /* number of internet streams */
 };
 
 #define pli_offsetof(field) offsetof(struct playlist_info, field)
@@ -260,8 +261,6 @@ struct db_playlist_info {
   char *id;
   char *title;
   char *type;
-  char *items;
-  char *streams;
   char *query;
   char *db_timestamp;
   char *disabled;
@@ -273,6 +272,9 @@ struct db_playlist_info {
   char *directory_id;
   char *query_order;
   char *query_limit;
+  char *media_kind;
+  char *items;
+  char *streams;
 };
 
 #define dbpli_offsetof(field) offsetof(struct db_playlist_info, field)
@@ -308,10 +310,13 @@ struct db_group_info {
 struct db_media_file_info {
   char *id;
   char *path;
+  char *virtual_path;
   char *fname;
+  char *directory_id;
   char *title;
   char *artist;
   char *album;
+  char *album_artist;
   char *genre;
   char *comment;
   char *type;
@@ -325,6 +330,7 @@ struct db_media_file_info {
   char *song_length;
   char *file_size;
   char *year;
+  char *date_released;
   char *track;
   char *total_tracks;
   char *disc;
@@ -334,14 +340,17 @@ struct db_media_file_info {
   char *artwork;
   char *rating;
   char *play_count;
+  char *skip_count;
   char *seek;
   char *data_kind;
+  char *media_kind;
   char *item_kind;
   char *description;
+  char *db_timestamp;
   char *time_added;
   char *time_modified;
   char *time_played;
-  char *db_timestamp;
+  char *time_skipped;
   char *disabled;
   char *sample_count;
   char *codectype;
@@ -349,8 +358,6 @@ struct db_media_file_info {
   char *has_video;
   char *contentrating;
   char *bits_per_sample;
-  char *album_artist;
-  char *media_kind;
   char *tv_episode_sort;
   char *tv_season_num;
   char *tv_series_name;
@@ -361,13 +368,9 @@ struct db_media_file_info {
   char *title_sort;
   char *artist_sort;
   char *album_sort;
-  char *composer_sort;
   char *album_artist_sort;
-  char *virtual_path;
-  char *directory_id;
-  char *date_released;
-  char *skip_count;
-  char *time_skipped;
+  char *composer_sort;
+  char *channels;
 };
 
 #define dbmfi_offsetof(field) offsetof(struct db_media_file_info, field)
@@ -412,6 +415,7 @@ enum directory_ids {
 struct directory_info {
   uint32_t id;
   char *virtual_path;
+  char *path;
   uint32_t db_timestamp;
   uint32_t disabled;
   uint32_t parent_id;
@@ -424,8 +428,7 @@ struct directory_enum {
   void *stmt;
 };
 
-struct db_queue_item
-{
+struct db_queue_item {
   /* A unique id for this queue item. If the same item appears multiple
      times in the queue each corresponding queue item has its own id. */
   uint32_t id;
@@ -433,18 +436,16 @@ struct db_queue_item
   /* Id of the file/item in the files database */
   uint32_t file_id;
 
-  /* Length of the item in ms */
-  uint32_t song_length;
+  uint32_t pos;
+  uint32_t shuffle_pos;
 
   /* Data type of the item */
   enum data_kind data_kind;
   /* Media type of the item */
   enum media_kind media_kind;
 
-  uint32_t seek;
-
-  uint32_t pos;
-  uint32_t shuffle_pos;
+  /* Length of the item in ms */
+  uint32_t song_length;
 
   char *path;
   char *virtual_path;
@@ -469,12 +470,30 @@ struct db_queue_item
   char *artwork_url;
 
   uint32_t queue_version;
+
+  char *composer;
+
+  char *type;
+  uint32_t bitrate;
+  uint32_t samplerate;
+  uint32_t channels;
+
+  int64_t songartistid;
+
+  /* Not saved in queue table */
+  uint32_t seek;
 };
+
+#define qi_offsetof(field) offsetof(struct db_queue_item, field)
 
 struct db_queue_add_info
 {
   int queue_version;
+  int start_pos;
   int pos;
+  int shuffle_pos;
+  int count;
+  int new_item_id;
 };
 
 char *
@@ -503,12 +522,6 @@ free_query_params(struct query_params *qp, int content_only);
 
 void
 free_queue_item(struct db_queue_item *queue_item, int content_only);
-
-void
-unicode_fixup_mfi(struct media_file_info *mfi);
-
-void
-fixup_tags_mfi(struct media_file_info *mfi);
 
 /* Maintenance and DB hygiene */
 void
@@ -541,7 +554,7 @@ int
 db_query_fetch_file(struct query_params *qp, struct db_media_file_info *dbmfi);
 
 int
-db_query_fetch_pl(struct query_params *qp, struct db_playlist_info *dbpli, int with_itemcount);
+db_query_fetch_pl(struct query_params *qp, struct db_playlist_info *dbpli);
 
 int
 db_query_fetch_group(struct query_params *qp, struct db_group_info *dbgri);
@@ -557,13 +570,16 @@ db_query_fetch_string_sort(struct query_params *qp, char **string, char **sortst
 
 /* Files */
 int
-db_files_get_count(void);
+db_files_get_count(uint32_t *nitems, uint32_t *nstreams, const char *filter);
 
 void
 db_file_inc_playcount(int id);
 
 void
 db_file_inc_skipcount(int id);
+
+void
+db_file_reset_playskip_count(int id);
 
 void
 db_file_ping(int id);
@@ -630,7 +646,7 @@ db_filecount_get(struct filecount_info *fci, struct query_params *qp);
 
 /* Playlists */
 int
-db_pl_get_count(void);
+db_pl_get_count(uint32_t *nitems);
 
 void
 db_pl_ping(int id);
@@ -693,7 +709,10 @@ db_group_persistentid_byid(int id, int64_t *persistentid);
 
 /* Directories */
 int
-db_directory_id_byvirtualpath(char *virtual_path);
+db_directory_id_byvirtualpath(const char *virtual_path);
+
+int
+db_directory_id_bypath(const char *path);
 
 int
 db_directory_enum_start(struct directory_enum *de);
@@ -705,7 +724,7 @@ void
 db_directory_enum_end(struct directory_enum *de);
 
 int
-db_directory_addorupdate(char *virtual_path, int disabled, int parent_id);
+db_directory_addorupdate(char *virtual_path, char *path, int disabled, int parent_id);
 
 void
 db_directory_ping_bymatch(char *virtual_path);
@@ -787,10 +806,10 @@ int
 db_queue_add_by_fileid(int id, char reshuffle, uint32_t item_id, int position, int *count, int *new_item_id);
 
 int
-db_queue_add_start(struct db_queue_add_info *queue_add_info);
+db_queue_add_start(struct db_queue_add_info *queue_add_info, int pos);
 
-void
-db_queue_add_end(struct db_queue_add_info *queue_add_info, int ret);
+int
+db_queue_add_end(struct db_queue_add_info *queue_add_info, char reshuffle, uint32_t item_id, int ret);
 
 int
 db_queue_add_item(struct db_queue_add_info *queue_add_info, struct db_queue_item *item);
@@ -850,7 +869,10 @@ int
 db_queue_reshuffle(uint32_t item_id);
 
 int
-db_queue_get_count();
+db_queue_inc_version(void);
+
+int
+db_queue_get_count(uint32_t *nitems);
 
 int
 db_queue_get_pos(uint32_t item_id, char shuffle);

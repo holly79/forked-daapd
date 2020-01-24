@@ -33,6 +33,7 @@
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <limits.h>
 #include <sys/param.h>
 #ifndef CLOCK_REALTIME
@@ -41,6 +42,8 @@
 
 #include <unistr.h>
 #include <uniconv.h>
+
+#include <libavutil/base64.h>
 
 #include "logger.h"
 #include "conffile.h"
@@ -341,6 +344,7 @@ safe_asprintf(const char *fmt, ...)
 {
   char *ret = NULL;
   va_list va;
+
   va_start(va, fmt);
   if (vasprintf(&ret, fmt, va) < 0)
     {
@@ -348,7 +352,32 @@ safe_asprintf(const char *fmt, ...)
       abort();
     }
   va_end(va);
+
   return ret;
+}
+
+int
+safe_snprintf_cat(char *dst, size_t n, const char *fmt, ...)
+{
+  size_t dstlen;
+  va_list va;
+  int ret;
+
+  if (!dst || !fmt)
+    return -1;
+
+  dstlen = strlen(dst);
+  if (n < dstlen)
+    return -1;
+
+  va_start(va, fmt);
+  ret = vsnprintf(dst + dstlen, n - dstlen, fmt, va);
+  va_end(va);
+
+  if (ret >= 0 && ret < n - dstlen)
+    return 0;
+  else
+    return -1;
 }
 
 
@@ -586,7 +615,7 @@ m_readfile(const char *path, int num_lines)
 	  goto error;
 	}
 
-      lines[i] = trimwhitespace(line);
+      lines[i] = atrim(line);
       if (!lines[i] || (strlen(lines[i]) == 0))
 	{
 	  DPRINTF(E_LOG, L_MISC, "Line %d in '%s' is invalid\n", i+1, path);
@@ -643,40 +672,58 @@ unicode_fixup_string(char *str, const char *fromcode)
 }
 
 char *
-trimwhitespace(const char *str)
+trim(char *str)
 {
-  char *ptr;
-  char *start;
-  char *out;
+  size_t start; // Position of first non-space char
+  size_t term;  // Position of 0-terminator
 
   if (!str)
     return NULL;
 
-  // Find the beginning
-  while (isspace(*str))
-    str++;
+  start = 0;
+  term  = strlen(str);
 
-  if (*str == 0) // All spaces?
-    return strdup("");
+  while ((start < term) && isspace(str[start]))
+    start++;
+  while ((term > start) && isspace(str[term - 1]))
+    term--;
 
-  // Make copy, because we will need to insert a null terminator
-  start = strdup(str);
-  if (!start)
+  str[term] = '\0';
+
+  // Shift chars incl. terminator
+  if (start)
+    memmove(str, str + start, term - start + 1);
+
+  return str;
+}
+
+char *
+atrim(const char *str)
+{
+  size_t start; // Position of first non-space char
+  size_t term;  // Position of 0-terminator
+  size_t size;
+  char *result;
+
+  if (!str)
     return NULL;
 
-  // Find the end
-  ptr = start + strlen(start) - 1;
-  while (ptr > start && isspace(*ptr))
-    ptr--;
+  start = 0;
+  term  = strlen(str);
 
-  // Insert null terminator
-  *(ptr+1) = 0;
+  while ((start < term) && isspace(str[start]))
+    start++;
+  while ((term > start) && isspace(str[term - 1]))
+    term--;
 
-  out = strdup(start);
+  size = term - start + 1;
 
-  free(start);
+  result = malloc(size);
 
-  return out;
+  memcpy(result, str + start, size);
+  result[size - 1] = '\0';
+
+  return result;
 }
 
 void
@@ -702,163 +749,75 @@ djb_hash(const void *data, size_t len)
   return hash;
 }
 
-
-static unsigned char b64_decode_table[256];
-
-char *
-b64_decode(const char *b64)
+int64_t
+two_str_hash(const char *a, const char *b)
 {
-  char *str;
-  const unsigned char *iptr;
-  unsigned char *optr;
-  unsigned char c;
-  int len;
+  char hashbuf[2048];
+  int64_t hash;
   int i;
+  int ret;
 
-  if (b64_decode_table[0] == 0)
+  ret = snprintf(hashbuf, sizeof(hashbuf), "%s==%s", (a) ? a : "", (b) ? b : "");
+  if (ret < 0 || ret == sizeof(hashbuf))
     {
-      memset(b64_decode_table, 0xff, sizeof(b64_decode_table));
-
-      /* Base64 encoding: A-Za-z0-9+/ */
-      for (i = 0; i < 26; i++)
-	{
-	  b64_decode_table['A' + i] = i;
-	  b64_decode_table['a' + i] = i + 26;
-	}
-
-      for (i = 0; i < 10; i++)
-	b64_decode_table['0' + i] = i + 52;
-
-      b64_decode_table['+'] = 62;
-      b64_decode_table['/'] = 63;
-
-      /* Stop on '=' */
-      b64_decode_table['='] = 100; /* > 63 */
+      DPRINTF(E_LOG, L_MISC, "Buffer too large to calculate hash: '%s==%s'\n", a, b);
+      return 999999; // Stand-in hash...
     }
 
-  len = strlen(b64);
+  for (i = 0; hashbuf[i]; i++)
+    hashbuf[i] = tolower(hashbuf[i]);
 
-  str = (char *)malloc(len);
-  if (!str)
-    return NULL;
+  // Limit hash length to 63 bits, due to signed type in sqlite
+  hash = murmur_hash64(hashbuf, strlen(hashbuf), 0) >> 1;
 
-  memset(str, 0, len);
-
-  iptr = (const unsigned char *)b64;
-  optr = (unsigned char *)str;
-  i = 0;
-
-  while (len)
-    {
-      if (*iptr == '=')
-	break;
-
-      c = b64_decode_table[*iptr];
-      if (c > 63)
-	{
-	  iptr++;
-	  len--;
-	  continue;
-	}
-
-      switch (i)
-	{
-	  case 0:
-	    optr[0] = c << 2;
-	    break;
-	  case 1:
-	    optr[0] |= c >> 4;
-	    optr[1] = c << 4;
-	    break;
-	  case 2:
-	    optr[1] |= c >> 2;
-	    optr[2] = c << 6;
-	    break;
-	  case 3:
-	    optr[2] |= c;
-	    break;
-	}
-
-      i++;
-      if (i == 4)
-	{
-	  optr += 3;
-	  i = 0;
-	}
-
-      len--;
-      iptr++;
-    }
-
-  return str;
+  return hash;
 }
 
-static const char b64_encode_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-static void
-b64_encode_block(const uint8_t *in, char *out, int len)
+uint8_t *
+b64_decode(int *dstlen, const char *src)
 {
-  out[0] = b64_encode_table[in[0] >> 2];
+  uint8_t *out;
+  int len;
+  int ret;
 
-  out[2] = out[3] = '=';
+  len = AV_BASE64_DECODE_SIZE(strlen(src));
 
-  if (len == 1)
-    out[1] = b64_encode_table[((in[0] & 0x03) << 4)];
-  else
+  CHECK_NULL(L_MISC, out = calloc(1, len));
+
+  ret = av_base64_decode(out, src, len);
+  if (ret < 0)
     {
-      out[1] = b64_encode_table[((in[0] & 0x03) << 4) | ((in[1] & 0xf0) >> 4)];
-
-      if (len == 2)
-	out[2] = b64_encode_table[((in[1] & 0x0f) << 2)];
-      else
-	{
-	  out[2] = b64_encode_table[((in[1] & 0x0f) << 2) | ((in[2] & 0xc0) >> 6)];
-	  out[3] = b64_encode_table[in[2] & 0x3f];
-	}
+      free(out);
+      return NULL;
     }
-}
 
-static void
-b64_encode_full_block(const uint8_t *in, char *out)
-{
-  out[0] = b64_encode_table[in[0] >> 2];
-  out[1] = b64_encode_table[((in[0] & 0x03) << 4) | ((in[1] & 0xf0) >> 4)];
-  out[2] = b64_encode_table[((in[1] & 0x0f) << 2) | ((in[2] & 0xc0) >> 6)];
-  out[3] = b64_encode_table[in[2] & 0x3f];
+  if (dstlen)
+    *dstlen = ret;
+
+  return out;
 }
 
 char *
-b64_encode(const uint8_t *in, size_t len)
+b64_encode(const uint8_t *src, int srclen)
 {
-  char *encoded;
   char *out;
+  int len;
+  char *ret;
 
-  /* 3 in chars -> 4 out chars */
-  encoded = (char *)malloc(len + (len / 3) + 4 + 1);
-  if (!encoded)
-    return NULL;
+  len = AV_BASE64_SIZE(srclen);
 
-  out = encoded;
+  CHECK_NULL(L_MISC, out = calloc(1, len));
 
-  while (len >= 3)
+  ret = av_base64_encode(out, len, src, srclen);
+  if (!ret)
     {
-      b64_encode_full_block(in, out);
-
-      len -= 3;
-      in += 3;
-      out += 4;
+      free(out);
+      return NULL;
     }
 
-  if (len > 0)
-    {
-      b64_encode_block(in, out, len);
-      out += 4;
-    }
-
-  out[0] = '\0';
-
-  return encoded;
+  return out;
 }
+
 
 /*
  * MurmurHash2, 64-bit versions, by Austin Appleby
@@ -997,6 +956,46 @@ murmur_hash64(const void *key, int len, uint32_t seed)
 #endif
 
 
+int
+linear_regression(double *m, double *b, double *r2, const double *x, const double *y, int n)
+{
+  double x_val;
+  double sum_x  = 0;
+  double sum_x2 = 0;
+  double sum_y  = 0;
+  double sum_y2 = 0;
+  double sum_xy = 0;
+  double denom;
+  int i;
+
+  for (i = 0; i < n; i++)
+    {
+      x_val   = x ? x[i] : (double)i;
+      sum_x  += x_val;
+      sum_x2 += x_val * x_val;
+      sum_y  += y[i];
+      sum_y2 += y[i] * y[i];
+      sum_xy += x_val * y[i];
+    }
+
+  denom = (n * sum_x2 - sum_x * sum_x);
+  if (denom == 0)
+    return -1;
+
+  *m = (n * sum_xy - sum_x * sum_y) / denom;
+  *b = (sum_y * sum_x2 - sum_x * sum_xy) / denom;
+  if (r2)
+    *r2 = (sum_xy - (sum_x * sum_y)/n) * (sum_xy - (sum_x * sum_y)/n) / ((sum_x2 - (sum_x * sum_x)/n) * (sum_y2 - (sum_y * sum_y)/n));
+
+  return 0;
+}
+
+bool
+quality_is_equal(struct media_quality *a, struct media_quality *b)
+{
+  return (a->sample_rate == b->sample_rate && a->bits_per_sample == b->bits_per_sample && a->channels == b->channels && a->bit_rate == b->bit_rate);
+}
+
 bool
 peer_address_is_trusted(const char *addr)
 {
@@ -1034,6 +1033,86 @@ peer_address_is_trusted(const char *addr)
   return false;
 }
 
+int
+ringbuffer_init(struct ringbuffer *buf, size_t size)
+{
+  memset(buf, 0, sizeof(struct ringbuffer));
+
+  CHECK_NULL(L_MISC, buf->buffer = malloc(size));
+  buf->size = size;
+  buf->write_avail = size;
+  return 0;
+}
+
+void
+ringbuffer_free(struct ringbuffer *buf, bool content_only)
+{
+  if (!buf)
+    return;
+
+  free(buf->buffer);
+
+  if (content_only)
+    memset(buf, 0, sizeof(struct ringbuffer));
+  else
+    free(buf);
+}
+
+size_t
+ringbuffer_write(struct ringbuffer *buf, const void* src, size_t srclen)
+{
+  int remaining;
+
+  if (buf->write_avail == 0 || srclen == 0)
+    return 0;
+
+  if (srclen > buf->write_avail)
+   srclen = buf->write_avail;
+
+  remaining = buf->size - buf->write_pos;
+  if (srclen > remaining)
+    {
+      memcpy(buf->buffer + buf->write_pos, src, remaining);
+      memcpy(buf->buffer, src + remaining, srclen - remaining);
+    }
+  else
+    {
+      memcpy(buf->buffer + buf->write_pos, src, srclen);
+    }
+
+  buf->write_pos = (buf->write_pos + srclen) % buf->size;
+
+  buf->write_avail -= srclen;
+  buf->read_avail += srclen;
+
+  return srclen;
+}
+
+size_t
+ringbuffer_read(uint8_t **dst, size_t dstlen, struct ringbuffer *buf)
+{
+  int remaining;
+
+  *dst = buf->buffer + buf->read_pos;
+
+  if (buf->read_avail == 0 || dstlen == 0)
+    return 0;
+
+  remaining = buf->size - buf->read_pos;
+
+  // The number of bytes we will return will be MIN(dstlen, remaining, read_avail)
+  if (dstlen > remaining)
+    dstlen = remaining;
+  if (dstlen > buf->read_avail)
+    dstlen = buf->read_avail;
+
+  buf->read_pos = (buf->read_pos + dstlen) % buf->size;
+
+  buf->write_avail += dstlen;
+  buf->read_avail -= dstlen;
+
+  return dstlen;
+}
 
 int
 clock_gettime_with_res(clockid_t clock_id, struct timespec *tp, struct timespec *res)

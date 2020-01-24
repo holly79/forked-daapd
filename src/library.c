@@ -98,6 +98,7 @@ static short deferred_update_events;
 static bool
 handle_deferred_update_notifications(void)
 {
+  time_t update_time;
   bool ret = (deferred_update_notifications > 0);
 
   if (ret)
@@ -105,7 +106,9 @@ handle_deferred_update_notifications(void)
       DPRINTF(E_DBG, L_LIB, "Database changed (%d changes)\n", deferred_update_notifications);
 
       deferred_update_notifications = 0;
-      db_admin_setint64(DB_ADMIN_DB_UPDATE, (int64_t) time(NULL));
+      update_time = time(NULL);
+      db_admin_setint64(DB_ADMIN_DB_UPDATE, (int64_t) update_time);
+      db_admin_setint64(DB_ADMIN_DB_MODIFIED, (int64_t) update_time);
     }
 
   return ret;
@@ -128,14 +131,6 @@ library_add_media(struct media_file_info *mfi)
 	      mfi->path, mfi->directory_id, mfi->virtual_path);
     }
 
-  if (!mfi->item_kind)
-    mfi->item_kind = 2; /* music */
-  if (!mfi->media_kind)
-    mfi->media_kind = MEDIA_KIND_MUSIC; /* music */
-
-  unicode_fixup_mfi(mfi);
-  fixup_tags_mfi(mfi);
-
   if (mfi->id == 0)
     db_file_add(mfi);
   else
@@ -143,12 +138,15 @@ library_add_media(struct media_file_info *mfi)
 }
 
 int
-library_queue_add(const char *path)
+library_queue_add(const char *path, int position, int *count, int *new_item_id)
 {
+  struct player_status status;
   int i;
   int ret;
 
   DPRINTF(E_DBG, L_LIB, "Add items for path '%s' to the queue\n", path);
+
+  player_get_status(&status);
 
   ret = LIBRARY_PATH_INVALID;
   for (i = 0; sources[i] && ret == LIBRARY_PATH_INVALID; i++)
@@ -159,7 +157,7 @@ library_queue_add(const char *path)
 	  continue;
 	}
 
-      ret = sources[i]->queue_add(path);
+      ret = sources[i]->queue_add(path, position, status.shuffle, status.item_id, count, new_item_id);
 
       if (ret == LIBRARY_OK)
 	{
@@ -297,6 +295,49 @@ rescan(void *arg, int *ret)
 }
 
 static enum command_state
+metarescan(void *arg, int *ret)
+{
+  time_t starttime;
+  time_t endtime;
+  int i;
+
+  DPRINTF(E_LOG, L_LIB, "Library meta rescan triggered\n");
+  listener_notify(LISTENER_UPDATE);
+  starttime = time(NULL);
+
+  for (i = 0; sources[i]; i++)
+    {
+      if (!sources[i]->disabled && sources[i]->metarescan)
+	{
+	  DPRINTF(E_INFO, L_LIB, "Meta rescan library source '%s'\n", sources[i]->name);
+	  sources[i]->metarescan();
+	}
+      else
+	{
+	  DPRINTF(E_INFO, L_LIB, "Library source '%s' is disabled\n", sources[i]->name);
+	}
+    }
+
+  purge_cruft(starttime);
+
+  DPRINTF(E_DBG, L_LIB, "Running post library scan jobs\n");
+  db_hook_post_scan();
+
+  endtime = time(NULL);
+  DPRINTF(E_LOG, L_LIB, "Library meta rescan completed in %.f sec (%d changes)\n", difftime(endtime, starttime), deferred_update_notifications);
+  scanning = false;
+
+  if (handle_deferred_update_notifications())
+    listener_notify(LISTENER_UPDATE | LISTENER_DATABASE);
+  else
+    listener_notify(LISTENER_UPDATE);
+
+  *ret = 0;
+  return COMMAND_END;
+}
+
+
+static enum command_state
 fullrescan(void *arg, int *ret)
 {
   time_t starttime;
@@ -384,6 +425,18 @@ library_rescan()
   commands_exec_async(cmdbase, rescan, NULL);
 }
 
+void
+library_metarescan()
+{
+  if (scanning)
+    {
+      DPRINTF(E_INFO, L_LIB, "Scan already running, ignoring request to trigger metadata scan\n");
+      return;
+    }
+
+  scanning = true; // TODO Guard "scanning" with a mutex
+  commands_exec_async(cmdbase, metarescan, NULL);
+}
 void
 library_fullrescan()
 {
@@ -738,5 +791,6 @@ library_deinit()
       sources[i]->deinit();
     }
 
+  event_free(updateev);
   event_base_free(evbase_lib);
 }

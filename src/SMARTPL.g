@@ -82,6 +82,10 @@ STRTAG		:	'artist'
 			|	'path'
 			|	'type'
 			|	'grouping'
+			|	'artist_id'
+			|	'album_id'
+			|	'songartistid'
+			|	'songalbumid'
 			;
 
 INTTAG		:	'play_count'
@@ -89,6 +93,8 @@ INTTAG		:	'play_count'
 			|	'rating'
 			|	'year'
 			|	'compilation'
+			|	'track'
+			|	'disc'
 			;
 
 DATETAG		:	'time_added'

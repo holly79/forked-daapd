@@ -128,6 +128,18 @@ parse_date(struct media_file_info *mfi, char *date_string)
   return ret;
 }
 
+static int
+parse_albumid(struct media_file_info *mfi, char *id_string)
+{
+  // Already set by a previous tag that we give higher priority
+  if (mfi->songalbumid)
+    return 0;
+
+  // Limit hash length to 63 bits, due to signed type in sqlite
+  mfi->songalbumid = murmur_hash64(id_string, strlen(id_string), 0) >> 1;
+  return 1;
+}
+
 /* Lookup is case-insensitive, first occurrence takes precedence */
 static const struct metadata_map md_map_generic[] =
   {
@@ -151,6 +163,16 @@ static const struct metadata_map md_map_generic[] =
     { "artist-sort",  0, mfi_offsetof(artist_sort),        NULL },
     { "album-sort",   0, mfi_offsetof(album_sort),         NULL },
     { "compilation",  1, mfi_offsetof(compilation),        NULL },
+
+    // These tags are used to determine if files belong to a common compilation
+    // or album, ref. https://picard.musicbrainz.org/docs/tags
+    { "MusicBrainz Album Id",         1, mfi_offsetof(songalbumid), parse_albumid },
+    { "MusicBrainz Release Group Id", 1, mfi_offsetof(songalbumid), parse_albumid },
+    { "MusicBrainz DiscID",           1, mfi_offsetof(songalbumid), parse_albumid },
+    { "CDDB DiscID",                  1, mfi_offsetof(songalbumid), parse_albumid },
+    { "iTunes_CDDB_IDs",              1, mfi_offsetof(songalbumid), parse_albumid },
+    { "CATALOGNUMBER",                1, mfi_offsetof(songalbumid), parse_albumid },
+    { "BARCODE",                      1, mfi_offsetof(songalbumid), parse_albumid },
 
     { NULL,           0, 0,                                NULL }
   };
@@ -201,6 +223,8 @@ static const struct metadata_map md_map_vorbis[] =
  *
  * Update 20180131: Removed tags supported by ffmpeg 2.5.4 (around 3 years old)
  * + added some tags used for grouping
+ * Update 20200114: Removed TDA, TDAT, TYE, TYER, TDR since the they are
+ * well supported by ffmpeg, and forked-daapd was parsing TDA/TDAT incorrectly
  *
  */
 static const struct metadata_map md_map_id3[] =
@@ -211,11 +235,6 @@ static const struct metadata_map md_map_id3[] =
     { "GRP1",                0, mfi_offsetof(grouping),              NULL },              /* unofficial iTunes */
     { "TCM",                 0, mfi_offsetof(composer),              NULL },              /* ID3v2.2 */
     { "TPA",                 1, mfi_offsetof(disc),                  parse_disc },        /* ID3v2.2 */
-    { "TYE",                 1, mfi_offsetof(year),                  NULL },              /* ID3v2.2 */
-    { "TYER",                1, mfi_offsetof(year),                  NULL },              /* ID3v2.3 */
-    { "TDA",                 1, mfi_offsetof(date_released),         parse_date },        /* ID3v2.2 */
-    { "TDAT",                1, mfi_offsetof(date_released),         parse_date },        /* ID3v2.3 */
-    { "TDR",                 1, mfi_offsetof(date_released),         parse_date },        /* ID3v2.2 */
     { "XSOA",                0, mfi_offsetof(album_sort),            NULL },              /* ID3v2.3 */
     { "XSOP",                0, mfi_offsetof(artist_sort),           NULL },              /* ID3v2.3 */
     { "XSOT",                0, mfi_offsetof(title_sort),            NULL },              /* ID3v2.3 */
@@ -351,6 +370,7 @@ scan_metadata_ffmpeg(const char *file, struct media_file_info *mfi)
   char *path;
   int mdcount;
   int sample_rate;
+  int channels;
   int i;
   int ret;
 
@@ -388,16 +408,17 @@ scan_metadata_ffmpeg(const char *file, struct media_file_info *mfi)
       return -1;
     }
 
-  free(path);
-
   ret = avformat_find_stream_info(ctx, NULL);
   if (ret < 0)
     {
       DPRINTF(E_WARN, L_SCAN, "Cannot get stream info of '%s': %s\n", path, err2str(ret));
 
       avformat_close_input(&ctx);
+      free(path);
       return -1;
     }
+
+  free(path);
 
 #if 0
   /* Dump input format as determined by ffmpeg */
@@ -415,21 +436,14 @@ scan_metadata_ffmpeg(const char *file, struct media_file_info *mfi)
 
   for (i = 0; i < ctx->nb_streams; i++)
     {
-#if HAVE_DECL_AVCODEC_PARAMETERS_FROM_CONTEXT
       codec_type = ctx->streams[i]->codecpar->codec_type;
       codec_id = ctx->streams[i]->codecpar->codec_id;
       sample_rate = ctx->streams[i]->codecpar->sample_rate;
       sample_fmt = ctx->streams[i]->codecpar->format;
-#else
-      codec_type = ctx->streams[i]->codec->codec_type;
-      codec_id = ctx->streams[i]->codec->codec_id;
-      sample_rate = ctx->streams[i]->codec->sample_rate;
-      sample_fmt = ctx->streams[i]->codec->sample_fmt;
-#endif
+      channels = ctx->streams[i]->codecpar->channels;
       switch (codec_type)
 	{
 	  case AVMEDIA_TYPE_VIDEO:
-#if LIBAVFORMAT_VERSION_MAJOR >= 55 || (LIBAVFORMAT_VERSION_MAJOR == 54 && LIBAVFORMAT_VERSION_MINOR >= 6)
 	    if (ctx->streams[i]->disposition & AV_DISPOSITION_ATTACHED_PIC)
 	      {
 		DPRINTF(E_DBG, L_SCAN, "Found embedded artwork (stream %d)\n", i);
@@ -437,7 +451,7 @@ scan_metadata_ffmpeg(const char *file, struct media_file_info *mfi)
 
 		break;
 	      }
-#endif
+
 	    // We treat these as audio no matter what
 	    if (mfi->compilation || (mfi->media_kind & (MEDIA_KIND_PODCAST | MEDIA_KIND_AUDIOBOOK)))
 	      break;
@@ -463,6 +477,7 @@ scan_metadata_ffmpeg(const char *file, struct media_file_info *mfi)
 		mfi->bits_per_sample = 8 * av_get_bytes_per_sample(sample_fmt);
 		if (mfi->bits_per_sample == 0)
 		  mfi->bits_per_sample = av_get_bits_per_sample(codec_id);
+		mfi->channels = channels;
 	      } 
 	    break;
 
@@ -488,7 +503,7 @@ scan_metadata_ffmpeg(const char *file, struct media_file_info *mfi)
   else if (ctx->duration > AV_TIME_BASE) /* guesstimate */
     mfi->bitrate = ((mfi->file_size * 8) / (ctx->duration / AV_TIME_BASE)) / 1000;
 
-  DPRINTF(E_DBG, L_SCAN, "Duration %d ms, bitrate %d kbps\n", mfi->song_length, mfi->bitrate);
+  DPRINTF(E_DBG, L_SCAN, "Duration %d ms, bitrate %d kbps, samplerate %d channels %d\n", mfi->song_length, mfi->bitrate, mfi->samplerate, mfi->channels);
 
   /* Try to extract ICY metadata if http stream */
   if (mfi->data_kind == DATA_KIND_HTTP)
